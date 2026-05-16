@@ -1,0 +1,1367 @@
+  <!-- YCLIENTS reviews widget for Tilda (new version with pagination, avatars, ratings) -->
+  <div id="yc-widget" aria-live="polite" data-field-container-value="grid" data-field-left-value="20" data-field-axisx-value="left" data-field-container-res-320-value="window" data-field-left-res-320-value="20" data-field-left-res-480-value="20" data-field-left-res-640-value="20" data-field-left-res-960-value="20" data-fields="left,container,axisx">
+    <div id="yc-filter" style="margin-bottom:10px;display:flex;align-items:center">
+      <label for="yc-trainer-select" style="font-size:13px;color:#666;margin-right:5px">Выбрать тренера:</label>
+      <select id="yc-trainer-select" style="padding:6px;border-radius:5px;border:1px solid #ddd;background:#fff;font-size:14px;margin-right:20px;width:200px">
+        <option value="">Все</option>
+      </select>
+      <div id="yc-rating-filter" style="display:none">
+        <span style="font-size:13px;color:#666;margin-right:4px">Оценка:</span>
+        <span id="yc-rating-all" style="cursor:pointer;font-size:13px;font-weight:500;color:#CC2841;margin-right:4px">все</span>
+        <div class="yc-rating-stars" style="display:flex;gap:1px">
+          <span class="yc-rating-star" data-rating="1">&#9733;</span>
+          <span class="yc-rating-star" data-rating="2">&#9733;</span>
+          <span class="yc-rating-star" data-rating="3">&#9733;</span>
+          <span class="yc-rating-star" data-rating="4">&#9733;</span>
+          <span class="yc-rating-star" data-rating="5">&#9733;</span>
+        </div>
+      </div>
+      <div class="yc-count" style="font-size:13px;color:#666"></div>
+      <div class="yc-nav-buttons" style="display:flex;gap:5px;margin-left:20px;">
+        <button class="yc-nav-prev" title="Предыдущие отзывы"></button>
+        <button class="yc-nav-next" title="Следующие отзывы"></button>
+      </div>
+    </div>
+    <div id="yc-list"><div class="yc-empty">Загрузка...</div></div>
+    <div id="yc-pagination" style="display:flex;justify-content:center;gap:8px;margin-top:16px"></div>
+  </div>
+
+  <style>
+    #yc-widget{
+      font-family:'Circe',Arial,Helvetica,sans-serif;
+      /* внутри колонки Tilda, без фулл-блида */
+      width: 100%;
+      position:relative;
+      left: 0;
+      transform: none;
+      /* без горизонтальных отступов, чтобы совпасть с колонкой */
+      padding:8px 0;
+      box-sizing:border-box;
+    }
+    .yc-header{display:flex;align-items:center;justify-content:space-between;margin-bottom:8px}
+    /* Hide the header title */
+    #yc-widget .yc-header { display: none; }
+    #yc-list{
+      position:relative;
+      left: 0;
+      width: 100%;
+    }
+    /* Slider styles */
+    /* slider within widget width, aligned with header */
+    .yc-slider{display:flex;align-items:flex-start;overflow:visible}
+  .yc-track{display:flex;gap:10px;overflow-x:auto;scroll-snap-type:x mandatory;-webkit-overflow-scrolling:touch;scroll-behavior:smooth;padding-left:0;box-sizing:border-box;align-items:flex-start;flex-wrap:nowrap}
+    /* hide native horizontal scrollbar for a cleaner card slider */
+    .yc-track::-webkit-scrollbar{display:none}
+    .yc-track{ -ms-overflow-style: none; scrollbar-width: none; }
+    /* Make each review appear as a card */
+  /* Cards stretch to column width; height adapts to content */
+  .yc-item{width:100%;background:#fff;border:1px solid #eee;padding:20px;border-radius:12px;box-shadow:0 6px 18px rgba(0,0,0,0.06);display:flex;flex-direction:column;gap:12px;align-items:flex-start;box-sizing:border-box;max-width:100%}
+    .yc-item .yc-content{flex:1;display:flex;flex-direction:column}
+    /* .yc-item .yc-meta{margin-bottom:8px} */ /* removed duplicate */
+    .yc-slider-btn{background:#007bff;color:#fff;border:0;padding:8px 10px;border-radius:8px;cursor:pointer;font-size:16px}
+    .yc-slider-btn:disabled{opacity:0.45;cursor:not-allowed}
+  /* Width on mobile is controlled by .yc-group; cards keep width:100% */
+  @media (max-width:959px){ }
+  /* Removed duplicate .yc-item rule to avoid conflicting gap/padding definitions */
+  /* Original .yc-item defined above with gap:12px and box-shadow:0 6px 18px; keep that one for consistency */
+  .yc-avatar{width:50px;height:50px;border-radius:50%;object-fit:cover}
+  /* Hide avatars on all devices */
+  .yc-avatar { display: none; }
+  .yc-content{flex:1;min-width:0}
+    .yc-meta{font-size:13px;color:#666;margin-bottom:10px;display:flex;gap:5px;align-items:center;flex-wrap:wrap}
+  /* Use pre-line to collapse excessive blank lines while preserving intentional line breaks */
+  .yc-text{font-size:16px;color:#333;white-space:pre-line;line-height:1.5;margin-bottom:0;overflow-wrap:anywhere;word-break:break-word}
+    /* Ensure exact 20px bottom spacing: last child inside content has no extra margin */
+    .yc-content > :last-child { margin-bottom: 0 !important; }
+    .yc-text-truncated {position:relative}
+    .yc-read-more {color:#CC2841;cursor:pointer;font-size:14px;margin-left:4px;text-decoration:underline}
+    .yc-read-more:hover {color:#A51F36}
+  /* Расширенная кликабельная зона вокруг «читать дальше» (+5px со всех сторон) */
+  .yc-read-more-wrap { display:inline-block; padding:5px; margin:-5px; border-radius:6px; cursor:pointer; z-index:20; position:relative; }
+  .yc-read-more-wrap:hover .yc-read-more { color:#A51F36; text-decoration:underline; }
+    /* Trainer link styling */
+    .yc-master { color:#CC2841; }
+    .yc-master-link { color:#CC2841; text-decoration:underline; }
+    .yc-master-link:hover { color:#A51F36; }
+    .yc-master-link:visited, .yc-master-link:active { color:#CC2841; }
+    /* Inline spinner for loading */
+    .yc-inline-spinner { display:inline-block; width:14px; height:14px; border:2px solid #E9B9C2; border-top-color:#CC2841; border-radius:50%; animation:ycspin 0.9s linear infinite; vertical-align:middle; margin-left:6px; margin-top:-3px; }
+    @keyframes ycspin { from { transform:rotate(0deg);} to { transform:rotate(360deg);} }
+    .yc-empty{padding:20px;text-align:center;color:#888;font-size:15px}
+    .yc-refresh{background:none;border:0;color:#007bff;cursor:pointer;padding:8px;font-size:14px;font-family:'Circe',Arial,sans-serif}
+    .yc-rating {display:inline-flex;align-items:center;gap:3px}
+    .yc-rating .star {color:#ddd;font-size:16px}
+    .yc-rating .star.filled {color:#ffb400}
+    /* Filter stars styling */
+    .yc-rating-stars .yc-rating-star {
+      color: #ddd;
+      cursor: pointer;
+      font-size: 16px;
+      transition: color 0.2s;
+    }
+    .yc-rating-stars .yc-rating-star.filled {
+      color: #ffb400;
+    }
+    .yc-rating-stars .yc-rating-star:hover {
+      color: #ffb400;
+    }
+    .yc-author, .yc-master {color:#555;font-weight:500}
+    .yc-sep {color:#ccc}
+    .yc-page-btn {padding:8px 14px;border:1px solid #ddd;background:#fff;cursor:pointer;border-radius:6px;font-family:'Circe',Arial,Helvetica,sans-serif;font-size:14px}
+    .yc-page-btn.active {background:#007bff;color:#fff;border-color:#007bff}
+    .yc-page-btn:disabled {color:#ccc;cursor:not-allowed}
+    .yc-page-ellipsis {padding:0 8px;color:#666;font-size:14px}
+
+    /* Move select arrow 5px left and use custom chevron */
+    #yc-filter #yc-trainer-select{
+      -webkit-appearance: none !important;
+      -moz-appearance: none !important;
+      appearance: none !important;
+      padding-right: 28px !important; /* space for custom arrow */
+      /* Переопределяем inline background шортхенд у select */
+      background-color:#fff !important;
+      background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23666' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpolyline points='6 9 12 15 18 9'/%3E%3C/svg%3E") !important;
+      background-repeat: no-repeat !important;
+      background-size: 14px 14px !important;
+      background-position: calc(100% - 11px) 50% !important; /* 5px левее обычного края */
+    }
+    /* Round dropdown corners for Firefox */
+    #yc-filter #yc-trainer-select::-moz-listbox {
+      border-radius: 5px !important;
+    }
+    /* Round dropdown corners for Chrome/Safari */
+    #yc-filter #yc-trainer-select::-webkit-listbox {
+      border-radius: 5px !important;
+    }
+
+    /* hide numeric pagination for slider variant */
+    #yc-pagination { display: none !important; }
+    /* show count text under header */
+    #yc-count { display: flex; align-items: center; white-space: nowrap; flex: 0 0 auto; color:#666; font-size:13px; }
+
+    /* Navigation buttons for reviews */
+    .yc-nav-buttons button {
+      width: 24px;
+      height: 24px;
+      border: 1px solid #ddd;
+      background-color: #fff;
+      border-radius: 4px;
+      cursor: pointer;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      padding: 0;
+      transition: background-color 0.2s, border-color 0.2s;
+    }
+    .yc-nav-buttons button:hover:not(:disabled) {
+      background-color: #f5f5f5;
+      border-color: #ccc;
+    }
+    .yc-nav-buttons button:disabled {
+      opacity: 0.5;
+      cursor: not-allowed;
+    }
+    .yc-nav-prev {
+      background-image: url('data:image/svg+xml;base64,PHN2ZyB3aWR0aD0iMTYiIGhlaWdodD0iMTYiIHZpZXdCb3g9IjAgMCAxNiAxNiIgZmlsbD0ibm9uZSIgeG1sbnM9Imh0dHA6Ly93d3cudzMub3JnLzIwMDAvc3ZnIj48cGF0aCBkPSJNMTAgMTJMMCA4TDEwIDR2OHoiIGZpbGw9IiM2NjYiLz48L3N2Zz4=');
+      background-size: 12px 12px;
+      background-repeat: no-repeat;
+      background-position: center;
+    }
+    .yc-nav-next {
+      background-image: url('data:image/svg+xml;base64,PHN2ZyB3aWR0aD0iMTYiIGhlaWdodD0iMTYiIHZpZXdCb3g9IjAgMCAxNiAxNiIgZmlsbD0ibm9uZSIgeG1sbnM9Imh0dHA6Ly93d3cudzMub3JnLzIwMDAvc3ZnIj48cGF0aCBkPSJNNiAxMkwxNiA4TDYgNFYxMnoiIGZpbGw9IiM2NjYiLz48L3N2Zz4=');
+      background-size: 12px 12px;
+      background-repeat: no-repeat;
+      background-position: center;
+    }
+
+    /* Stronger rules to ensure cards in the track keep fixed size (avoid being overridden) */
+    .yc-track{min-height:140px;background:transparent;margin-left:0px}
+    /* padding-left is controlled in JS; keep zero here to avoid double offset */
+    .yc-track{padding-left:0;box-sizing:border-box;overscroll-behavior-x:contain;overscroll-behavior-y:auto;touch-action:pan-y}
+  /* Snap к колонкам, а не к отдельным карточкам */
+  /* .yc-track > .yc-group{scroll-snap-align:start}  */
+    .yc-slider-btn{z-index:4}
+
+    /* Desktop: 20px от левого края Grid Container, как у текстового блока */
+    @media (min-width: 960px) and (max-width: 1199px){
+      #yc-widget{ left: calc(50% - 460px); }
+    }
+    @media (min-width: 1200px){
+      #yc-widget{ left: calc(50% - 580px); }
+      .yc-track{ margin-left: 0px; }
+    }
+    @media (max-width: 959px) and (min-width: 641px){
+      #yc-widget{ left: calc(50% - 300px); }
+    }
+    @media (max-width: 639px) and (min-width: 481px){
+      #yc-widget{ left: calc(50% - 220px); }
+    }
+    @media (max-width: 479px){
+      #yc-widget{ left: 20px; }
+    }
+    /* Mobile and tablet: отступ 20px от левой границы Window Container */
+    @media (max-width: 959px){
+      #yc-filter{ margin-top: -10px; }
+      #yc-trainer-select{ margin-right: 5px; width: auto; max-width: 200px; }
+      .yc-nav-buttons button { opacity: 0; }
+      /* Remove additional bottom margin so the distance to card edge stays exactly 20px */
+      .yc-text { margin-bottom: 0; }
+    }
+
+    /* Mobile-only swipe areas */
+    @media (max-width: 639px){
+      .yc-swipe-left, .yc-swipe-right {
+        position: absolute;
+        width: 50px;
+        z-index: 10;
+        cursor: pointer;
+        top: 0;
+        -webkit-tap-highlight-color: transparent;
+      }
+      .yc-swipe-left {
+        left: 0;
+      }
+      .yc-swipe-right {
+        right: 0;
+      }
+    }
+
+    /* New styles for grouped vertical layout */
+    .yc-group {
+      display:flex;
+      flex-direction:column;
+      gap:10px;
+      width:320px;
+      flex:0 0 320px;
+      scroll-snap-align:start;
+      box-sizing:border-box;
+    }
+    /* Убираем margin-right: используем gap трека */
+    .yc-item-small {
+      /* Keep same paddings as large; height purely from content */
+      padding: 20px;
+    }
+    @media (max-width: 959px) {
+      .yc-group {
+        width: 280px;
+        flex: 0 0 280px;
+      }
+      .yc-item-small { padding: 20px; }
+    }
+    /* Empty placeholder groups at the end of the track */
+    .yc-empty-group {
+      opacity: 0;
+    }
+  </style>
+
+  <script>
+  (function(){
+    // === Настройки ===
+    const WORKER_URL = 'https://api.barista-school.ru'; // custom domain (was: proxy-worker.rookman13.workers.dev)
+    const API_KEY = 'T2t7a5whm57Wwu70TgSyRm0Wu3p0ueZODRmzZr2jla2Tl459rqFTGv0XMyq6P5eU'; // ключ для доступа
+    // Жесткий сдвиг всего блока вправо на desktop (для выравнивания фильтров и карточек)
+    const FORCE_LEFT_OFFSET_PX = 0; // 0 чтобы выключить
+    // Дополнительный левый коррект (переместить все карточки налево на 10px)
+    const EXTRA_LEFT_ADJUST = 0; // px (отрицательное приводит к смещению влево)
+    // Двухэтапная загрузка ===
+    // Этап 1: первые N отзывов быстро (для мгновенного чтения)
+    // Этап 2: фоновая полная догрузка всех отзывов
+    const STAGE_ONE_COUNT = 20; // первая порция (~18KB) — быстро даже на медленном соединении
+    const FULL_LOAD_PAGE_SIZE = 50; // размер страницы при полной загрузке (~50KB, compromise)
+    // (legacy fallback constants, если понадобится переключить режим)
+    const LIMIT = 7; // максимальная серверная страница (исторически)
+    const INITIAL_LOAD = 10;
+    const BATCH_LOAD = 5;
+    let currentPage = 1; // указатель страниц (используется в полном цикле)
+    let currentTrainer = localStorage.getItem('yc_trainer') || '';
+    let currentRating = 0; // Always 0, rating filter disabled
+    // Глобальный кэш отзывов: ключ '' для «Все», остальные = id тренера
+    // Структура: { initialLoaded, fullLoaded, initialItems[], fullItems[], loadingFull }
+    const reviewsCache = {};
+    const TRAINERS_LOCAL_KEY = 'yc_trainers_v1';
+    const REVIEWS_CACHE_KEY = 'yc_reviews_v2'; // localStorage кэш отзывов
+    const REVIEWS_CACHE_TTL = 30 * 60 * 1000; // 30 минут
+    // === Видимость тренеров ===
+    // 1 = показывать, 0 = скрыть. Если id отсутствует — показывается по умолчанию.
+    const TRAINER_VISIBILITY = {
+      '2730371': 0, // Александра
+      '3781544': 0, // Алина
+      '1322836': 1, // Анастасия Кадушкина
+      '2586628': 0, // Валерия
+      '2748512': 1, // Денис Храмов
+      '3257457': 0, // Ева Гуцу
+      '2350188': 0, // Иван Колпаков
+      '2164697': 0, // Максим Литвинов
+      '2151123': 0, // Марина Никифорова
+      '2694420': 0, // Милица Дементьева
+      '3866140': 1, // Никита
+      '3323198': 0, // Никита Бобачев
+      '3269178': 1, // Роман Лунгу
+      '3915755': 1, // Сабрина
+      '1322544': 1, // Суслин Роман
+      '4103142': 0, // Тренер 4103142 (имя пока неизвестно)
+      '4837950': 0, // Аркадий Скалин
+    };
+    // === Fallback-имена тренеров (если /trainers недоступен) ===
+    const STAFF_FALLBACK = {
+      '2730371': 'Александра',
+      '3781544': 'Алина',
+      '1322836': 'Анастасия Кадушкина',
+      '2586628': 'Валерия',
+      '2748512': 'Денис Ефремов',
+      '3257457': 'Ева Гуцу',
+      '2350188': 'Иван Колпаков',
+      '2164697': 'Максим Литвинов',
+      '2151123': 'Марина Никифорова',
+      '2694420': 'Милица Дементьева',
+      '3866140': 'Никита Баховский',
+      '3323198': 'Никита Бобачев',
+      '3269178': 'Роман Лунгу',
+      '3915755': 'Сабрина Темурова',
+      '1322544': 'Суслин Роман',
+      '4103142': 'Тренер 4103142',
+      '4837950': 'Аркадий Скалин',
+    };
+    // === Ссылки на попапы тренеров в Тильде (якоря) ===
+    const TRAINER_POPUPS = {
+      '2748512': '#denefrem',
+      '3269178': '#romba',
+      '3866140': '#nikita',
+      '3915755': '#sabrina',
+      '1322544': '#roman',
+      '1322836': '#nastiya',
+      '4837950': '#skalin',
+    };
+    // Fetch с таймаутом (AbortController) — защита от зависания на нестабильном соединении
+    const FETCH_TIMEOUT_MS = 15000; // 15 секунд (страницы по 50KB должны укладываться)
+    function fetchWithTimeout(url, options = {}, timeoutMs = FETCH_TIMEOUT_MS) {
+      const controller = new AbortController();
+      const timer = setTimeout(() => controller.abort(), timeoutMs);
+      return fetch(url, { ...options, signal: controller.signal })
+        .finally(() => clearTimeout(timer));
+    }
+
+    const listEl = document.getElementById('yc-list');
+    const paginationEl = document.getElementById('yc-pagination');
+    const trainerSelect = document.getElementById('yc-trainer-select');
+    trainerSelect.addEventListener('change', () => {
+      currentTrainer = trainerSelect.value || '';
+      localStorage.setItem('yc_trainer', currentTrainer);
+      loadInitial(1);
+    });
+
+    // Rating filter disabled - all reviews have 5 stars
+
+    function updateRenderedMasterNames(map){
+      try {
+        const items = document.querySelectorAll('#yc-list .yc-item');
+        items.forEach(el => {
+          const mid = el.getAttribute('data-master-id');
+          if (mid && map[mid]) {
+            const masterEl = el.querySelector('.yc-master');
+            if (masterEl) masterEl.textContent = map[mid];
+          }
+        });
+      } catch(e){ console.warn('updateRenderedMasterNames failed', e); }
+    }
+    
+      // Скрыть тренеров, помеченных 0 в TRAINER_VISIBILITY (как из селекта, так и из карточек)
+      function applyTrainerVisibility(){
+        try {
+          // В персональном режиме (когда выбран конкретный тренер) НЕ скрываем его карточки, даже если стоит 0.
+          if (currentTrainer) return;
+          const disabledIds = Object.entries(TRAINER_VISIBILITY)
+            .filter(([id, v]) => Number(v) === 0)
+            .map(([id]) => String(id));
+          if (!disabledIds.length) return;
+          document.querySelectorAll('#yc-list .yc-item').forEach(el => {
+            const mid = el.getAttribute('data-master-id');
+            if (mid && disabledIds.includes(mid)) {
+              el.style.display = 'none';
+              el.classList.add('yc-hidden-trainer');
+            }
+          });
+          // Селект больше НЕ чистим, чтобы можно было выбрать скрытого тренера напрямую.
+        } catch(e){ console.warn('applyTrainerVisibility failed', e); }
+      }
+
+    async function loadTrainers(){
+      // Immediate UI: populate from localStorage (if present) or STAFF_FALLBACK
+      try {
+        let initialList = null;
+        try {
+          const raw = localStorage.getItem(TRAINERS_LOCAL_KEY);
+          if (raw) {
+            const parsed = JSON.parse(raw);
+            if (Array.isArray(parsed) && parsed.length) initialList = parsed;
+          }
+        } catch (e) {
+          console.warn('Failed to read trainers from localStorage', e);
+        }
+        if (!initialList) {
+          initialList = Object.keys(STAFF_FALLBACK).map(id => ({ id, name: STAFF_FALLBACK[id], count: 0 }));
+        }
+    trainerSelect.innerHTML = '<option value="">Все</option>' + initialList.map(t => `<option value="${escapeHtml(String(t.id))}" ${String(t.id)===String(currentTrainer)?'selected':''}>${escapeHtml(t.name)}</option>`).join('');
+    trainerSelect.value = currentTrainer || '';
+    trainerSelect.disabled = false; // make control usable immediately
+
+        // Now fetch fresh trainers in background and update when available
+        const headers = { 'Accept': 'application/json' };
+        if (API_KEY) headers['X-API-Key'] = API_KEY;
+        const base = WORKER_URL.replace(/\/+$/, '');
+        // Одна попытка без ретраев (экономим время на медленном ISP)
+        const resp = await fetchWithTimeout(`${base}/trainers?include_zero=1`, { headers });
+        if (!resp.ok) throw new Error(`trainers status ${resp.status}`);
+        const body = await resp.json();
+    const list = (body && body.trainers) ? body.trainers : [];
+    let finalList = list && list.length ? list : Object.keys(STAFF_FALLBACK).map(id => ({ id, name: STAFF_FALLBACK[id], count: 0 }));
+    // Переопределить имена из STAFF_FALLBACK для consistency
+    finalList = finalList.map(t => ({ ...t, name: STAFF_FALLBACK[String(t.id)] || t.name }));
+    // Карта id -> имя для актуализации уже отрисованных карточек
+    const trainerMap = finalList.reduce((acc, t) => { acc[String(t.id)] = t.name; return acc; }, {});
+        // Apply static per-file visibility (if configured)
+        try {
+          const hasStatic = Object.keys(TRAINER_VISIBILITY || {}).length > 0;
+          if (hasStatic) {
+            finalList = finalList.filter(t => {
+              const v = TRAINER_VISIBILITY[String(t.id)];
+              if (typeof v === 'number') return Number(v) === 1;
+              return true;
+            });
+          }
+        } catch (e) {
+          console.warn('TRAINER_VISIBILITY parse error', e);
+        }
+        // persist for next loads
+        try { localStorage.setItem(TRAINERS_LOCAL_KEY, JSON.stringify(finalList)); } catch(e){/* ignore */}
+    // populate select with fresh list
+      trainerSelect.innerHTML = '<option value="">Все</option>' + finalList.map(t => `<option value="${escapeHtml(String(t.id))}" ${String(t.id)===String(currentTrainer)?'selected':''}>${escapeHtml(t.name)}</option>`).join('');
+      trainerSelect.value = currentTrainer || '';
+      // Обновить уже показанные карточки отзывов именами из /trainers (если были placeholders)
+      updateRenderedMasterNames(trainerMap);
+    // Применить скрытие по TRAINER_VISIBILITY
+    applyTrainerVisibility();
+        // После загрузки списка тренеров запускаем пред-загрузку отзывов (этап 1) для всех видимых
+        try { preloadStageOneForAll(finalList); } catch(e){ console.warn('preloadStageOneForAll failed', e); }
+      } catch (e) {
+        console.warn('Failed to load trainers:', e && e.message ? e.message : e);
+        // keep initial fallback (already set) and make control usable
+        trainerSelect.disabled = false;
+      }
+    }
+
+    function generateAvatar(firstLetter) {
+      const letter = (firstLetter || '?').toUpperCase();
+      const svg = `<svg width="60" height="60" viewBox="0 0 60 60" fill="none" xmlns="http://www.w3.org/2000/svg">
+        <circle cx="30" cy="30" r="30" fill="#F8DDE1"/>
+        <text x="30" y="38" text-anchor="middle" fill="#CC2841" font-family="Circe, Arial, Helvetica, sans-serif" font-size="24" font-weight="600">${letter}</text>
+      </svg>`;
+      // btoa fails for non-Latin1 characters (e.g. Cyrillic in font names).
+      // Use UTF-8 safe base64 encoder.
+      function base64EncodeUnicode(str) {
+        // First we encodeURIComponent, then convert percent encodings to raw bytes,
+        // then btoa the result. This preserves Unicode characters correctly.
+        return btoa(encodeURIComponent(str).replace(/%([0-9A-F]{2})/g, function(match, p1){
+          return String.fromCharCode('0x' + p1);
+        }));
+      }
+      const svgBase64 = base64EncodeUnicode(svg);
+      return `data:image/svg+xml;base64,${svgBase64}`;
+    }
+    function escapeHtml(s){ return String(s || '').replace(/[&<>"']/g, ch => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[ch])); }
+    function unescapeHtml(s){ return String(s || '').replace(/&amp;/g, '&').replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&quot;/g, '"').replace(/&#39;/g, "'"); }
+    // Normalize review text: trim edges, collapse 3+ newlines to 2, strip trailing spaces on lines
+    function normalizeText(s){
+      try {
+        if (!s) return '';
+        let t = String(s).replace(/\r\n/g, '\n');
+        // collapse 3+ consecutive newlines into exactly two (paragraph break)
+        t = t.replace(/\n{3,}/g, '\n\n');
+        // remove trailing spaces/tabs at line ends
+        t = t.replace(/[ \t]+$/gm, '');
+        // trim overall
+        t = t.trim();
+        return t;
+      } catch(_) { return String(s||''); }
+    }
+    // Форматировать дату: показываем только дату (дд.мм.гггг), время убираем
+    function fmtDate(d){
+      try {
+        const dt = new Date(d);
+        if (isNaN(dt)) return (d||'');
+        // Используем локальную русскую дату без времени
+        return dt.toLocaleDateString('ru-RU');
+      } catch(e){
+        return d||'';
+      }
+    }
+
+    // client-side lazy-loading pipeline
+    let itemsBuffer = []; // accumulated items
+    let lastRenderedCount = 0; // how many items are already in DOM
+    let totalAvailable = null; // total available items from server (if provided)
+    let fetching = false;
+    let exhausted = false; // whether server has no more items
+    // Глобально отслеживаем открытый (развёрнутый) отзыв, чтобы держать открытым только один
+    let openReviewKey = null;
+
+    // Стабильный ключ для отзыва (используется для сохранения состояния между перерисовками)
+    function getReviewKey(it){
+      try {
+        const id = it.id || (it.body && it.body.id) || (it.compact && it.compact.id);
+        if (id) return String(id);
+        const data = (it.body && it.body.data) ? it.body.data : {};
+        const c = it.compact || {};
+        const author = c.author_name || data.author_name || data.user_name || data.client_name || '';
+        const date = c.date || data.date || data.created_at || '';
+        const mid = c.master_id || data.master_id || data.staff_id || '';
+        const text = (c.text || data.text || data.message || '').slice(0, 80);
+        const str = [author, date, mid, text].join('|');
+        let h = 5381; for (let i=0;i<str.length;i++){ h = ((h<<5)+h) + str.charCodeAt(i); h |= 0; }
+        return String(h >>> 0);
+      } catch(_) { return Math.random().toString(36).slice(2); }
+    }
+
+    // Хелперы для разворачивания/сворачивания по ключу
+    function getTextContainerByKey(key){
+      return document.getElementById('review-' + String(key));
+    }
+    function expandReviewByKey(key){
+      try {
+        const el = getTextContainerByKey(key);
+        if (!el) return false;
+        const rm = el.querySelector('.yc-read-more');
+        const ct = el.querySelector('.yc-text-content');
+        if (!rm || !ct) return false;
+        const fullText = unescapeHtml(decodeURIComponent(rm.getAttribute('data-full') || ''));
+        ct.innerHTML = escapeHtml(fullText);
+        rm.textContent = 'свернуть';
+        return true;
+      } catch(_) { return false; }
+    }
+    function collapseReviewByKey(key){
+      try {
+        const el = getTextContainerByKey(key);
+        if (!el) return false;
+        const rm = el.querySelector('.yc-read-more');
+        const ct = el.querySelector('.yc-text-content');
+        if (!rm || !ct) return false;
+        const ft = decodeURIComponent(rm.getAttribute('data-full') || '');
+        const words = ft.split(/\s+/).filter(w => w.length > 0);
+        const truncatedText = words.slice(0, 50).join(' ');
+        ct.innerHTML = escapeHtml(truncatedText) + '...';
+        rm.textContent = 'читать дальше';
+        return true;
+      } catch(_) { return false; }
+    }
+
+    // Helpers to fetch from /reviews with fallback to /events
+    function enrichItemsWithFallback(items){
+      try {
+        return items.map(it => {
+          try {
+            const data = (it.body && it.body.data) ? it.body.data : (it.body?.event?.data || {});
+            const mid = data.master_id || data.staff_id || (it.compact && (it.compact.master_id || it.compact.staff_id));
+            // Определяем имя тренера: сначала из данных, затем из compact, затем из fallback
+            let mname = data.master_name || (it.compact && it.compact.master_name) || '';
+            if (mid && STAFF_FALLBACK[String(mid)]) {
+              mname = STAFF_FALLBACK[String(mid)];
+            }
+            // Присваиваем обратно, чтобы downstream логика видела имя
+            if (mname) {
+              if (it.body && it.body.data) it.body.data.master_name = mname;
+              if (it.compact) {
+                it.compact.master_name = mname;
+                if (mid && !it.compact.master_id) it.compact.master_id = mid;
+              }
+            }
+          } catch(_){}
+          return it;
+        });
+      } catch(e){ return items; }
+    }
+
+    async function fetchPageFromServer(count, page, trainerId = '', rating = 0) {
+      console.log('Fetching reviews:', { count, page, trainerId, rating, API_KEY: API_KEY ? 'present' : 'missing' });
+      const headers = { 'Accept': 'application/json' };
+      if (API_KEY) headers['X-API-Key'] = API_KEY;
+      console.log('Headers:', headers);
+      const base = WORKER_URL.replace(/\/+$/, '');
+      // prefer /reviews
+      const staffQuery = trainerId ? `&staff_id=${encodeURIComponent(trainerId)}` : (currentTrainer ? `&staff_id=${encodeURIComponent(currentTrainer)}` : '');
+      const ratingQuery = rating > 0 ? `&rating_min=${rating}` : '';
+      // Одна попытка, без fallback на /events (он ~28 сек и бесполезен на медленном ISP)
+      try {
+        const resp = await fetchWithTimeout(`${base}/reviews?company_id=453962&count=${count}&page=${page}${staffQuery}${ratingQuery}`, { headers });
+        if (!resp.ok) throw new Error(`reviews status ${resp.status}`);
+        const json = await resp.json();
+        console.log('Fetched reviews:', json.items ? json.items.length : 0, 'page', page);
+        if (json && Array.isArray(json.items)) json.items = enrichItemsWithFallback(json.items);
+        return json;
+      } catch (err) {
+        console.warn('fetchPageFromServer failed:', err.message, {count, page});
+        throw err;
+      }
+    }
+
+    // Быстрая загрузка первых STAGE_ONE_COUNT для trainerId
+    async function ensureStageOne(trainerId, rating = 0){
+      const key = String(trainerId || '') + ':' + String(rating);
+      if (!reviewsCache[key]) reviewsCache[key] = { initialLoaded:false, fullLoaded:false, initialItems:[], fullItems:[], loadingFull:false };
+      const entry = reviewsCache[key];
+      if (entry.initialLoaded) return entry.initialItems;
+      try {
+        const body = await fetchPageFromServer(STAGE_ONE_COUNT, 1, trainerId, rating);
+        const { items = [] } = body || {};
+        entry.initialItems = items;
+        entry.initialLoaded = true;
+        // Если меньше чем STAGE_ONE_COUNT вернулось, считаем что полный набор = то что есть
+        if (items.length < STAGE_ONE_COUNT) {
+          entry.fullItems = items.slice();
+          entry.fullLoaded = true;
+        }
+      } catch(e){ console.warn('ensureStageOne failed', trainerId, rating, e); }
+      return entry.initialItems;
+    }
+
+    // Чтение отзывов из localStorage (если не устарели)
+    function getReviewsFromCache(trainerId, rating) {
+      try {
+        const k = `${REVIEWS_CACHE_KEY}_${trainerId || 'all'}_${rating}`;
+        const raw = localStorage.getItem(k);
+        if (!raw) return null;
+        const parsed = JSON.parse(raw);
+        if (!parsed || !parsed.ts || !Array.isArray(parsed.items)) return null;
+        if (Date.now() - parsed.ts > REVIEWS_CACHE_TTL) return null; // устарел
+        return parsed.items;
+      } catch(e) { return null; }
+    }
+    // Сохранение отзывов в localStorage
+    function saveReviewsToCache(trainerId, rating, items) {
+      try {
+        const k = `${REVIEWS_CACHE_KEY}_${trainerId || 'all'}_${rating}`;
+        localStorage.setItem(k, JSON.stringify({ ts: Date.now(), items }));
+      } catch(e) { /* игнорируем */ }
+    }
+
+    // Фоновая полная загрузка всех страниц для trainerId
+    async function ensureFull(trainerId, rating = 0){
+      const key = String(trainerId || '') + ':' + String(rating);
+      if (!reviewsCache[key]) reviewsCache[key] = { initialLoaded:false, fullLoaded:false, initialItems:[], fullItems:[], loadingFull:false };
+      const entry = reviewsCache[key];
+      if (entry.fullLoaded || entry.loadingFull) return entry.fullItems;
+      entry.loadingFull = true;
+      // Объявляем до try, чтобы catch имел доступ
+      let page = entry.initialLoaded && entry.initialItems.length > 0 ? 2 : 1;
+      let all = entry.initialItems.slice();
+      try {
+        let guard = 0;
+        while (true) {
+          const body = await fetchPageFromServer(FULL_LOAD_PAGE_SIZE, page, trainerId, rating);
+          const { items = [], page: respPage } = body || {};
+          if (!items || !items.length) break;
+          all.push(...items);
+          // Обновить DOM если это текущий вид
+          if ((currentTrainer === trainerId || (!trainerId && currentTrainer === '')) && currentRating === rating) {
+            itemsBuffer = all.slice();
+            // Если DOM ещё показывает спиннер/пусто — принудительный полный ререндер
+            const domIsBlank = !!listEl.querySelector('.yc-empty');
+            renderBuffer(domIsBlank);
+          }
+          page = (respPage && respPage >= 1) ? respPage + 1 : page + 1;
+          if (items.length < FULL_LOAD_PAGE_SIZE) break;
+          guard++; if (guard > 100) break;
+        }
+        entry.fullItems = all;
+        entry.fullLoaded = true;
+        // Сохраняем полный набор в localStorage
+        saveReviewsToCache(trainerId, rating, all);
+        // Финальное обновление DOM
+        if ((currentTrainer === trainerId || (!trainerId && currentTrainer === '')) && currentRating === rating) {
+          itemsBuffer = entry.fullItems.slice();
+          renderBuffer(false);
+        }
+      } catch(e){
+        console.warn('ensureFull failed at page', page, trainerId, rating, e);
+        // Сохраняем то, что успели загрузить (partial data)
+        if (all.length > 0) {
+          entry.fullItems = all;
+          entry.fullLoaded = true; // Не пытаться снова
+          saveReviewsToCache(trainerId, rating, all);
+          if ((currentTrainer === trainerId || (!trainerId && currentTrainer === '')) && currentRating === rating) {
+            itemsBuffer = all.slice();
+            renderBuffer(false);
+          }
+        }
+      }
+      finally {
+        entry.loadingFull = false;
+        // Обновить счётчик/спиннер после завершения (успех или ошибка)
+        try { updateVisibleCounter(); } catch(_){}
+      }
+      return entry.fullItems;
+    }
+
+    // Первичная точка входа (рендер для текущего фильтра)
+    async function loadInitial(){
+      console.log('loadInitial called for trainer:', currentTrainer, 'window.innerWidth:', window.innerWidth);
+
+      listEl.innerHTML = '<div class="yc-empty">Загрузка...<span class="yc-inline-spinner"></span></div>';
+      paginationEl.innerHTML = '';
+      itemsBuffer = [];
+      try {
+        const key = String(currentTrainer || '') + ':' + String(currentRating);
+        const entry = reviewsCache[key];
+        if (entry && entry.fullLoaded) {
+          // Есть полный набор в памяти (ранее загруженный) — сразу рендерим
+          itemsBuffer = (entry.fullItems || []).slice();
+          renderBuffer(true);
+          return;
+        }
+        // Fallback: localStorage кэш
+        const cached = getReviewsFromCache(currentTrainer || '', currentRating);
+        if (cached && cached.length > 0) {
+          itemsBuffer = cached.slice();
+          renderBuffer(true);
+          ensureFull(currentTrainer || '', currentRating).catch(function(){});
+          return;
+        }
+        // Сетевая загрузка
+        if (currentRating > 0) {
+          const items = await ensureFull(currentTrainer || '', currentRating);
+          itemsBuffer = items.slice();
+          renderBuffer(true);
+        } else {
+          const items = await ensureStageOne(currentTrainer || '', currentRating);
+          if (items.length > 0) {
+            itemsBuffer = items.slice();
+            renderBuffer(true);
+          }
+          ensureFull(currentTrainer || '', currentRating).catch(function(e) {
+            console.warn('ensureFull background failed:', e && e.message);
+            if (items.length === 0 && itemsBuffer.length === 0) {
+              listEl.innerHTML = '<div class="yc-empty">Не удалось загрузить отзывы. <span style="text-decoration:underline;cursor:pointer" onclick="window.__yclients_widget.refresh()">Попробовать снова</span></div>';
+            }
+          });
+        }
+      } catch(e){
+        console.log('loadInitial failed:', e);
+        if (itemsBuffer.length === 0) {
+          listEl.innerHTML = '<div class="yc-empty">Не удалось загрузить. <span style="text-decoration:underline;cursor:pointer" onclick="window.__yclients_widget.refresh()">Попробовать снова</span></div>';
+        }
+      }
+    }
+
+    async function loadMore(){ /* full-load mode: not used */ }
+
+    // Render the accumulated buffer into the slider
+    function renderBuffer(forceRerender = false){
+      // Построим множества видимых и скрытых тренеров на основе TRAINER_VISIBILITY
+      const visEntries = Object.entries(TRAINER_VISIBILITY || {});
+      const VISIBLE_IDS = new Set(visEntries.filter(([id, v]) => Number(v) === 1).map(([id]) => String(id)));
+      const HIDDEN_IDS = new Set(visEntries.filter(([id, v]) => Number(v) === 0).map(([id]) => String(id)));
+      const isAll = !currentTrainer; // выбор «Все»
+
+      const filteredItems = (itemsBuffer || []).filter(it => {
+        const data = (it.body && it.body.data) ? it.body.data : {};
+        const c = it.compact || {
+          text: data.text || data.message || '',
+          date: data.date || data.created_at || '',
+          rating: data.rating ?? data.rate ?? data.score ?? data.stars ?? data.mark ?? data.value ?? null,
+          author_name: data.author_name || data.user_name || data.client_name || data.author || '',
+          author_surname: data.author_surname || data.user_surname || '',
+          master_id: data.master_id || data.staff_id || null,
+          master_name: data.master_name || data.master || ''
+        };
+        const text = (c.text || '').trim();
+        const words = (text || '').split(/\s+/).filter(w => w.length > 0);
+          if (words.length < 4) return false;
+
+          const mid = String(c.master_id || '');
+          const mname = String(c.master_name || '').trim();
+
+    // Абсолютное правило: тренеры с 0 не показываются в режиме «Все», но при индивидуальном выборе разрешаем (чтобы не терять отзывы)
+    if (isAll && mid && HIDDEN_IDS.has(mid)) return false;
+
+    // Требуем имя тренера (fallback уже пытается заполнить). Если вдруг нет — скрываем.
+    if (!mname) return false;
+
+          // Логика «Все»: показываем только тренеров с 1
+          if (isAll) {
+            // если master_id отсутствует или не отмечен как 1 — не показываем
+            if (!mid) return false;
+            if (VISIBLE_IDS.size > 0 && !VISIBLE_IDS.has(mid)) return false;
+            return true;
+          }
+
+      // Логика персонального фильтра: показываем выбранного тренера независимо от его статуса в карте видимости
+      if (mid !== String(currentTrainer)) return false;
+      // Белый список не ограничивает персональный выбор (если пользователь смог выбрать тренера — показать его отзывы)
+          return true;
+      });
+
+      // Remove duplicates based on review ID
+      const seenIds = new Set();
+      const uniqueItems = filteredItems.filter(it => {
+        const id = it.id || (it.body && it.body.id) || (it.compact && it.compact.id);
+        if (!id || seenIds.has(id)) return false;
+        seenIds.add(id);
+        return true;
+      });
+      if (!uniqueItems.length) { listEl.innerHTML = '<div class="yc-empty">Пока нет отзывов</div>'; return; }
+      // Grouping rule:
+      // - Large (>15 слов) занимает отдельную колонку.
+      // - Small (<=15 слов) всегда формирует колонку из 2 отзывов.
+      //   Разрешена «подтяжка» второго small из более поздних элементов, чтобы колонка была полной.
+      //   Единственное исключение — последняя колонка может содержать 1 small, если отзывов больше нет.
+      const groups = [];
+      // Разделим по типу, сохраняя исходный индекс для восстановления относительного порядка
+      const smalls = [];
+      const larges = [];
+      uniqueItems.forEach((it, idx) => {
+        const data = (it.body && it.body.data) ? it.body.data : {};
+        const c = it.compact || {
+          text: data.text || data.message || '',
+          date: data.date || data.created_at || '',
+          rating: data.rating ?? data.rate ?? data.score ?? data.stars ?? data.mark ?? data.value ?? null,
+          author_name: data.author_name || data.user_name || data.client_name || data.author || '',
+          author_surname: data.author_surname || data.user_surname || '',
+          master_id: data.master_id || data.staff_id || null,
+          master_name: data.master_name || data.master || ''
+        };
+        const text = (c.text || '').trim();
+        const words = text.split(/\s+/).filter(w => w.length > 0);
+        const isLarge = words.length > 15;
+        if (isLarge) larges.push({ item: it, idx }); else smalls.push({ item: it, idx });
+      });
+      let ps = 0; // pointer for smalls
+      let pl = 0; // pointer for larges
+      // Формируем колонки, двигаясь слева направо по минимальному исходному индексу следующего доступного элемента
+      while (ps < smalls.length || pl < larges.length) {
+        const nextSmallIdx = ps < smalls.length ? smalls[ps].idx : Infinity;
+        const nextLargeIdx = pl < larges.length ? larges[pl].idx : Infinity;
+        if (nextSmallIdx <= nextLargeIdx) {
+          // Следующим по порядку идёт small — стараемся собрать пару из двух small
+          if (ps + 1 < smalls.length) {
+            groups.push([
+              { item: smalls[ps].item, size: 'small' },
+              { item: smalls[ps + 1].item, size: 'small' }
+            ]);
+            ps += 2;
+          } else {
+            // Нет второго small сейчас. Если остались крупные — поставим крупный, small подождёт, иначе — кладём одинокий small (последняя колонка)
+            if (pl < larges.length) {
+              groups.push([{ item: larges[pl].item, size: 'large' }]);
+              pl += 1;
+            } else {
+              groups.push([{ item: smalls[ps].item, size: 'small' }]);
+              ps += 1;
+            }
+          }
+        } else {
+          // Раньше по списку идёт large — выводим его
+          groups.push([{ item: larges[pl].item, size: 'large' }]);
+          pl += 1;
+        }
+      }
+      const cardsHtml = groups.map(group => {
+        const itemsHtml = group.map(({ item, size }) => renderItem(item, size)).join('');
+        return `<div class="yc-group">${itemsHtml}</div>`;
+      }).join('');
+      // Add empty placeholder columns at the end for better scrolling UX
+      const isMobile = window.innerWidth <= 639; // Mobile phones: <=639px
+      const numEmptyGroups = isMobile ? 1 : 2; // 1 empty on mobile, 2 on desktop/tablet
+      let emptyGroupsHtml = '';
+      for (let i = 0; i < numEmptyGroups; i++) {
+        emptyGroupsHtml += '<div class="yc-group yc-empty-group"></div>';
+      }
+      const finalCardsHtml = cardsHtml + emptyGroupsHtml;
+      const wrapper = listEl.querySelector('.yc-slider');
+      const track = wrapper ? wrapper.querySelector('.yc-track') : null;
+      // If a review is currently expanded, try to preserve its exact DOM so it won't flicker
+      let preservedClone = null;
+      try {
+        if (track && openReviewKey) {
+          const curEl = track.querySelector(`#review-${openReviewKey}`);
+          if (curEl) preservedClone = curEl.cloneNode(true);
+        }
+      } catch(_) { preservedClone = null; }
+
+      if (!wrapper || !track) {
+        listEl.innerHTML = `<div class="yc-slider"><div class="yc-track" role="list">${finalCardsHtml}</div></div>`;
+        initSlider(listEl);
+        lastRenderedCount = uniqueItems.length;
+        // If we preserved a clone (unlikely here because track didn't exist), attempt to reapply
+        try { if (preservedClone) {
+          const newTrack = listEl.querySelector('.yc-track');
+          const newEl = newTrack ? newTrack.querySelector(`#review-${openReviewKey}`) : null;
+          if (newEl) newEl.replaceWith(preservedClone);
+        }} catch(_){ }
+      } else {
+        // Update track content without resetting scroll position
+        track.innerHTML = finalCardsHtml;
+        // Replace freshly-rendered expanded node with the preserved clone so it stays exactly as user left it
+        try {
+          if (preservedClone) {
+            const newEl = track.querySelector(`#review-${openReviewKey}`);
+            if (newEl) newEl.replaceWith(preservedClone);
+          }
+        } catch(_) { /* ignore */ }
+        lastRenderedCount = uniqueItems.length;
+      }
+        // После рендера применить скрытие (если изменилось состояние)
+        applyTrainerVisibility();
+        // Обновить счётчик позиции после изменений DOM
+        try { if (window.__yclients_widget && typeof window.__yclients_widget._updateCounter === 'function') window.__yclients_widget._updateCounter(); } catch(_){}
+        // Show loading indicator at end if still loading full
+        try {
+          if (window.innerWidth >= 960) { // Only show loader on desktop
+            const anyLoading = Object.values(reviewsCache).some(entry => entry.loadingFull && !entry.fullLoaded);
+            const existingLoader = track.querySelector('.yc-empty');
+            if (existingLoader && existingLoader.textContent.includes('Загружаем ещё отзывы')) {
+              if (!anyLoading) {
+                existingLoader.remove();
+              }
+            } else if (anyLoading) {
+              const loadingHtml = '<div class="yc-empty" style="margin:20px;">Загружаем ещё отзывы...<span class="yc-inline-spinner"></span></div>';
+              track.insertAdjacentHTML('beforeend', loadingHtml);
+            }
+          } else {
+            // On mobile, remove any existing loader
+            const existingLoader = track.querySelector('.yc-empty');
+            if (existingLoader && existingLoader.textContent.includes('Загружаем ещё отзывы')) {
+              existingLoader.remove();
+            }
+          }
+        } catch(_){}
+      // If we have less than totalAvailable loaded, show a subtle loader at end (or automatic fetch on scroll handled by initSlider)
+    }
+
+    // load trainers on init
+    loadTrainers().then(() => {
+      // ensure selection reflects localStorage
+      if (currentTrainer) {
+        const opt = trainerSelect.querySelector(`option[value="${currentTrainer}"]`);
+        if (opt) opt.selected = true;
+      }
+    });
+
+    function renderStars(n) {
+      if (n === null || typeof n === 'undefined') return '';
+      const out = [];
+      const val = Math.min(5, Math.max(0, Number(n) || 0));
+      for (let i=1;i<=5;i++){
+        out.push(`<span class="star${i<=val ? ' filled' : ''}">&#9733;</span>`);
+      }
+      return `<span class="yc-rating" aria-label="Рейтинг: ${val} из 5">${out.join('')}</span>`;
+    }
+
+    function renderItem(it, size = 'large'){
+      const data = (it.body && it.body.data) ? it.body.data : {};
+      const c = it.compact || (it.body && it.body.data ? {
+        event: it.body.event,
+        text: data.text || data.message || '',
+        date: data.date || data.created_at || '',
+        id: it.id || '',
+        rating: (typeof data.rating !== 'undefined') ? data.rating : (data.rate || data.score || data.stars || data.mark || data.value || null),
+        author_name: data.author_name || data.user_name || data.client_name || data.author || '',
+        author_surname: data.author_surname || data.user_surname || '',
+        master_id: data.master_id || data.staff_id || null,
+        master_name: data.master_name || data.master || ''
+      } : null);
+
+      console.log('Rendering item:', it.id, 'data:', data, 'compact:', c);
+
+      // Handle client data
+      let author = c.author_name || '';
+      if (data.client) {
+        if (typeof data.client === 'object' && data.client.name) {
+          author = data.client.name;
+        } else if (typeof data.client === 'string') {
+          author = data.client;
+        }
+      }
+      if (!author && c.author_name) author = c.author_name;
+
+      // Handle staff data
+      let master = c.master_name || '';
+      if (data.staff) {
+        if (typeof data.staff === 'object' && data.staff.name) {
+          master = data.staff.name;
+        } else if (typeof data.staff === 'string') {
+          master = data.staff;
+        }
+      }
+      if (!master && c.master_name) master = c.master_name;
+
+      // Handle rating
+      let rating = c.rating;
+      if (typeof rating === 'undefined' || rating === null) {
+        rating = data.rating || data.rate || data.score || data.stars || data.mark || data.value || null;
+      }
+
+      if (!author) author = 'Аноним';
+      if (!master) master = 'Не указан';
+
+  let rawText = c && c.text ? unescapeHtml(c.text) : (data && (data.text || data.message) ? unescapeHtml(data.text || data.message) : '');
+  const text = normalizeText(rawText);
+      const dateStr = c && c.date ? fmtDate(c.date) : (data && (data.date || data.created_at) ? fmtDate(data.date || data.created_at) : '');
+      const ratingHtml = rating !== null && rating !== undefined ? renderStars(rating) : '';
+      const firstLetter = author !== 'Аноним' ? author.charAt(0) : '?';
+      const avatar = generateAvatar(firstLetter);
+
+  // Handle text truncation based on size
+  const maxWords = size === 'small' ? Infinity : 50;
+      const reviewKey = getReviewKey(it);
+      const itemDomId = `review-${reviewKey}`;
+      let textHtml = '';
+  const words = text.split(/\s+/).filter(w => w.length > 0);
+      if (words.length > maxWords) {
+        const truncatedText = words.slice(0, maxWords).join(' ');
+        // store full text in a data attribute (URI-encoded) to avoid breaking the inline onclick
+  const encodedFull = encodeURIComponent(text);
+        textHtml = `<div class="yc-text-truncated" id="${itemDomId}" data-review-key="${reviewKey}">
+          <span class="yc-text-content">${escapeHtml(truncatedText)}...</span>
+          <span class="yc-read-more-wrap" role="button" tabindex="0" onclick="window.__yclients_widget.toggleReviewByKey('${reviewKey}')" onkeydown="if(event.key==='Enter'||event.key===' ') window.__yclients_widget.toggleReviewByKey('${reviewKey}')"><span class="yc-read-more" data-full="${encodedFull}">читать дальше</span></span>
+        </div>`;
+      } else {
+  textHtml = `<div class="yc-text">${escapeHtml(text)}</div>`;
+      }
+
+      const midStr = String(c.master_id || '');
+      const authorHtml = author ? author : '';
+      let masterHtml = '';
+      if (master) {
+        const href = TRAINER_POPUPS[midStr];
+        if (href) masterHtml = ' о тренере: <a class="yc-master yc-master-link" href="' + href + '">' + escapeHtml(master) + '</a>';
+        else masterHtml = ' о тренере: <span class="yc-master">' + escapeHtml(master) + '</span>';
+      }
+
+      const sizeClass = size === 'small' ? 'yc-item-small' : 'yc-item-large';
+      return `<div class="yc-item ${sizeClass}" data-master-id="${escapeHtml(String(c.master_id||''))}">
+                <img src="${avatar}" alt="Аватар" class="yc-avatar">
+                <div class="yc-content">
+                  <div class="yc-meta">
+                    ${authorHtml}${masterHtml} · ${ratingHtml ? ratingHtml + ' · ' : ''}<span>${escapeHtml(dateStr)}</span>
+                  </div>
+                  ${textHtml}
+                </div>
+              </div>`;
+    }
+
+    function renderPagination(totalPages, currentPage) {
+      if (totalPages <= 1) { paginationEl.innerHTML = ''; return; }
+      const maxVisible = 5; // максимум видимых номеров страниц
+      const half = Math.floor(maxVisible / 2);
+      let start = Math.max(1, currentPage - half);
+      let end = Math.min(totalPages, start + maxVisible - 1);
+      start = Math.max(1, end - maxVisible + 1);
+
+      const parts = [];
+      // left arrow
+      parts.push(`<button class="yc-page-btn" ${currentPage<=1? 'disabled':''} onclick="window.__yclients_widget.goToPage(${Math.max(1,currentPage-1)})">◄</button>`);
+      if (start > 1) parts.push(`<button class="yc-page-btn" onclick="window.__yclients_widget.goToPage(1)">1</button><span class="yc-page-ellipsis">...</span>`);
+      for (let i = start; i <= end; i++) {
+        if (i === currentPage) parts.push(`<button class="yc-page-btn active" disabled>${i}</button>`);
+        else parts.push(`<button class="yc-page-btn" onclick="window.__yclients_widget.goToPage(${i})">${i}</button>`);
+      }
+      if (end < totalPages) parts.push(`<span class="yc-page-ellipsis">...</span><button class="yc-page-btn" onclick="window.__yclients_widget.goToPage(${totalPages})">${totalPages}</button>`);
+      // right arrow
+      parts.push(`<button class="yc-page-btn" ${currentPage>=totalPages? 'disabled':''} onclick="window.__yclients_widget.goToPage(${Math.min(totalPages,currentPage+1)})">►</button>`);
+      paginationEl.innerHTML = parts.join('');
+    }
+
+    // Initialize slider controls: drag-to-scroll and wheel-to-scroll (no visible arrows)
+    let countEl = null;
+    let filterEl = null;
+    let track = null;
+    function updateVisibleCounter() {
+      try {
+        if (!track) return;
+        const items = Array.from(track.querySelectorAll('.yc-item')).filter(el => el.style.display !== 'none');
+        if (!items.length) {
+          if (countEl) countEl.textContent = '';
+          return;
+        }
+        // Прогресс: считаем, сколько карточек пользователь уже "пролистал/увидел" слева направо.
+        // Берём индекс крайней правой карточки, у которой хоть часть видна (overlap > 0).
+        const viewportLeft = Math.round(track.scrollLeft);
+        const viewportRight = viewportLeft + track.clientWidth;
+        let maxIndexSeen = 0; // 1-based индекс последней увиденной (частично или полностью)
+        items.forEach((it, idx) => {
+          const left = it.offsetLeft;
+          const right = left + it.offsetWidth;
+          const overlap = Math.min(right, viewportRight) - Math.max(left, viewportLeft);
+          if (overlap > 0) {
+            // карточка хотя бы частично видна
+            const oneBased = idx + 1;
+            if (oneBased > maxIndexSeen) maxIndexSeen = oneBased;
+          } else if (right <= viewportLeft) {
+            // карточка полностью ушла влево
+            const oneBased = idx + 1;
+            if (oneBased > maxIndexSeen) maxIndexSeen = oneBased; // считаем её увиденной ранее
+          }
+        });
+        if (!maxIndexSeen) maxIndexSeen = 1;
+        const total = items.length;
+        // Проверка статуса загрузки полного набора: если идёт фоновая догрузка, показываем спиннер
+        let spinnerHtml = '';
+        try {
+          const anyLoading = Object.values(reviewsCache).some(entry => entry.loadingFull && !entry.fullLoaded);
+          if (anyLoading) spinnerHtml = '<span class="yc-inline-spinner" aria-label="Загрузка"></span>';
+        } catch(_){}
+        if (countEl) {
+          const textEl = countEl.querySelector('.yc-count-text');
+          if (textEl) textEl.innerHTML = `Просмотрено: ${maxIndexSeen} из ${total} ${spinnerHtml}`;
+        }
+      } catch (e) { /* ignore */ }
+    }
+    function initSlider(root) {
+      try {
+        track = root.querySelector('.yc-track');
+        const wrapper = root.querySelector('.yc-slider');
+        if (!track) return;
+        filterEl = document.getElementById('yc-filter');
+        countEl = document.querySelector('#yc-widget .yc-count') || document.getElementById('yc-count');
+        if (countEl) {
+          countEl.innerHTML = '<span class="yc-count-text"></span>';
+        }
+        const prevBtn = filterEl.querySelector('.yc-nav-prev');
+        const nextBtn = filterEl.querySelector('.yc-nav-next');
+        function updateButtonStates() {
+          if (prevBtn) prevBtn.disabled = track.scrollLeft <= 0;
+          if (nextBtn) nextBtn.disabled = track.scrollLeft >= (track.scrollWidth - track.clientWidth);
+        }
+        const scrollByCards = (direction) => {
+          const isMobile = window.innerWidth < 640;
+          const cardsPerScroll = isMobile ? 1 : 2;
+          const cardWidth = isMobile ? 280 : 320; // match .yc-group widths
+    const gap = 10; // match .yc-track gap
+    const scrollAmount = direction * (cardsPerScroll * cardWidth + (cardsPerScroll - 1) * gap);
+          track.scrollBy({ left: scrollAmount, behavior: 'smooth' });
+        };
+        if (prevBtn) prevBtn.addEventListener('click', () => scrollByCards(-1));
+        if (nextBtn) nextBtn.addEventListener('click', () => scrollByCards(1));
+        // Add invisible swipe areas on mobile
+        let leftSwipeArea, rightSwipeArea;
+        const updateSwipeAreas = () => {
+          if (!leftSwipeArea || !rightSwipeArea) return;
+          const rect = wrapper.getBoundingClientRect();
+          const maxHeight = Math.max(...Array.from(wrapper.querySelectorAll('.yc-item')).map(el => el.offsetHeight || 0));
+          leftSwipeArea.style.left = (-rect.left) + 'px';
+          leftSwipeArea.style.height = maxHeight + 'px';
+          rightSwipeArea.style.right = (- (window.innerWidth - rect.left - rect.width)) + 'px';
+          rightSwipeArea.style.height = maxHeight + 'px';
+        };
+        if (window.innerWidth <= 639) {
+          leftSwipeArea = document.createElement('div');
+          leftSwipeArea.className = 'yc-swipe-left';
+          leftSwipeArea.addEventListener('click', () => { if (track.scrollLeft > 0) scrollByCards(-1); }); // scroll left
+          leftSwipeArea.addEventListener('touchstart', (e) => { e.preventDefault(); if (track.scrollLeft > 0) scrollByCards(-1); }, { passive: false });
+          wrapper.appendChild(leftSwipeArea);
+          rightSwipeArea = document.createElement('div');
+          rightSwipeArea.className = 'yc-swipe-right';
+          rightSwipeArea.addEventListener('click', () => { if (track.scrollLeft < track.scrollWidth - track.clientWidth) scrollByCards(1); }); // scroll right
+          rightSwipeArea.addEventListener('touchstart', (e) => { e.preventDefault(); if (track.scrollLeft < track.scrollWidth - track.clientWidth) scrollByCards(1); }, { passive: false });
+          wrapper.appendChild(rightSwipeArea);
+          updateSwipeAreas();
+        }
+        // Expose for external updates
+        window.updateSwipeAreas = updateSwipeAreas;
+        // --- Robust alignment: compute left offset dynamically so the first card
+        // aligns with surrounding page content (handles Tilda overrides).
+        const widgetEl = document.getElementById('yc-widget');
+        function getContentLeft() {
+          try {
+            // Tilda pages usually have a .t-container for the content grid
+            const cont = widgetEl?.closest('.t-container') || document.querySelector('.t-container');
+            if (cont) {
+              // Prefer the inner column edge if present (matches text baseline)
+              const innerCol = cont.querySelector('.t-col') || cont.querySelector('[class*="t-col_"]');
+              const target = innerCol || cont;
+              return Math.max(0, Math.round(target.getBoundingClientRect().left));
+            }
+          } catch(_) {}
+          // fallback to widget position or fixed 365
+          try { if (widgetEl) return Math.max(0, Math.round(widgetEl.getBoundingClientRect().left)); } catch(_) {}
+          return 365;
+        }
+        function getContentRight() {
+          try {
+            // Tilda pages usually have a .t-container for the content grid
+            const cont = widgetEl?.closest('.t-container') || document.querySelector('.t-container');
+            if (cont) {
+              // Prefer the inner column edge if present (matches text baseline)
+              const innerCol = cont.querySelector('.t-col') || cont.querySelector('[class*="t-col_"]');
+              const target = innerCol || cont;
+              return Math.round(target.getBoundingClientRect().right);
+            }
+          } catch(_) {}
+          // fallback to window width minus padding
+          return window.innerWidth - 20;
+        }
+        function applyTrackOffset() {
+          try {
+            // На desktop отключаем translateX у трека, так как весь блок уже отступлен на 365px
+            if (window.innerWidth >= 960 && FORCE_LEFT_OFFSET_PX) {
+              track.style.transform = 'none';
+              track.style.boxSizing = 'border-box';
+              track.style.pointerEvents = 'auto';
+              track.style.zIndex = 2;
+              track.style.marginLeft = (EXTRA_LEFT_ADJUST || 0) + 'px';
+              return;
+            }
+            // For all other cases, disable shift to prevent left movement
+            track.style.transform = 'translateX(0px)';
+            track.style.boxSizing = 'border-box';
+            track.style.pointerEvents = 'auto';
+            track.style.zIndex = 2;
+            // Do not reset scrollLeft on mobile to preserve position
+          } catch (e) { /* ignore */ }
+        }
+        // initial apply and update on resize (debounced)
+        applyTrackOffset();
+        let _resizeTO = null;
+        window.addEventListener('resize', () => {
+          clearTimeout(_resizeTO);
+          _resizeTO = setTimeout(applyTrackOffset, 120);
+        });
+        // Pointer drag to scroll
+        let isDown = false;
+        let startX = 0;
+        let scrollLeft = 0;
+        track.style.cursor = 'grab';
+        track.addEventListener('mousedown', (e) => {
+          isDown = true;
+          track.classList.add('active');
+          startX = e.pageX - track.offsetLeft;
+          scrollLeft = track.scrollLeft;
+          track.style.cursor = 'grabbing';
+          e.preventDefault();
+        });
+        window.addEventListener('mouseup', () => {
+          isDown = false;
+          track.classList.remove('active');
+          track.style.cursor = 'grab';
+        });
+        track.addEventListener('mouseleave', () => {
+          isDown = false;
+          track.classList.remove('active');
+          track.style.cursor = 'grab';
+        });
+        track.addEventListener('mousemove', (e) => {
+          if (!isDown) return;
+          e.preventDefault();
+          const x = e.pageX - track.offsetLeft;
+          const walk = (x - startX) * 2.2; // в 2 раза чувствительнее, чтобы скроллить было легче
+          track.scrollLeft = scrollLeft - walk;
+        });
+        // Touch support
+        let touchStartX = 0;
+        let touchScrollLeft = 0;
+        track.addEventListener('touchstart', (e) => {
+          touchStartX = e.touches[0].pageX - track.offsetLeft;
+          touchScrollLeft = track.scrollLeft;
+        }, { passive: true });
+        track.addEventListener('touchmove', (e) => {
+          const x = e.touches[0].pageX - track.offsetLeft;
+          const walk = (x - touchStartX) * 2.8; // 4x more sensitive, reduced by 30%
+          track.scrollLeft = touchScrollLeft - walk;
+        }, { passive: true });
+        // Удалён кастомный перехват колёсика: используется стандартный скролл браузера.
+
+        // Авто-сворачивание раскрытого отзыва, если он ушёл с экрана (по вертикали окна или горизонтально из трека)
+        function collapseIfHidden() {
+          try {
+            if (!openReviewKey) return;
+            const textEl = getTextContainerByKey(openReviewKey);
+            if (!textEl) { openReviewKey = null; return; }
+            const card = textEl.closest('.yc-item');
+            if (!card) { openReviewKey = null; return; }
+            // Проверяем ТОЛЬКО горизонтальный уход карточки из области трека.
+            // Вертикальная прокрутка страницы НЕ приводит к автосворачиванию.
+            const viewportLeft = Math.round(track.scrollLeft);
+            const viewportRight = viewportLeft + track.clientWidth;
+            const left = card.offsetLeft;
+            const right = left + card.offsetWidth;
+            const horizontalOverlap = Math.min(right, viewportRight) - Math.max(left, viewportLeft);
+            const isVisibleHoriz = horizontalOverlap > 0;
+            if (!isVisibleHoriz) {
+              // Свернуть текущий раскрытый
+              if (collapseReviewByKey(openReviewKey)) {
+                openReviewKey = null;
+              }
+            }
+          } catch(_) { /* ignore */ }
+        }
+        // update on relevant events
+    track.addEventListener('scroll', () => { updateVisibleCounter(); collapseIfHidden(); });
+    // Removed broken window scroll sync that caused jumps and referenced undefined savedScrollLeft
+    window.addEventListener('resize', () => {
+      clearTimeout(_resizeTO);
+      _resizeTO = setTimeout(() => { applyTrackOffset(); updateVisibleCounter(); collapseIfHidden(); }, 140);
+    });
+        // run once after init
+    setTimeout(() => { updateVisibleCounter(); collapseIfHidden(); }, 40);
+        // expose for external updates after re-render
+        try { window.__yclients_widget._updateCounter = updateVisibleCounter; } catch(_){}
+
+        // Автодогрузка отключена (все отзывы подгружаются сразу)
+      } catch (e) { console.warn('initSlider failed', e); }
+    }
+
+    // initial
+    loadInitial();
+    window.__yclients_widget = { 
+      refresh: () => loadInitial(), 
+      loadMore: () => loadMore(),
+        goToPage: (p) => { itemsBuffer = []; exhausted = false; loadInitial(Number(p) || 1); },
+        hideTrainer: (id) => { try { TRAINER_VISIBILITY[String(id)] = 0; applyTrainerVisibility(); } catch(e){} },
+        showTrainer: (id) => { try { TRAINER_VISIBILITY[String(id)] = 1; // перерисовать селект и список
+            loadTrainers(); renderBuffer(); } catch(e){} },
+      toggleReviewByKey: (key) => {
+        const curEl = getTextContainerByKey(key);
+        if (!curEl) return;
+        const curContentEl = curEl.querySelector('.yc-text-content');
+        const curReadMoreEl = curEl.querySelector('.yc-read-more');
+        if (!curContentEl || !curReadMoreEl) return;
+        const fullText = unescapeHtml(decodeURIComponent(curReadMoreEl.getAttribute('data-full') || ''));
+
+        const collapseKey = (k) => { try { collapseReviewByKey(k); } catch(_){} };
+
+        if (curReadMoreEl.textContent === 'читать дальше') {
+          // Свернуть ранее открытый (если другой)
+          if (openReviewKey && openReviewKey !== String(key)) collapseKey(openReviewKey);
+          // Раскрыть текущий
+          curContentEl.innerHTML = escapeHtml(fullText);
+          curReadMoreEl.textContent = 'свернуть';
+          openReviewKey = String(key);
+        } else {
+          // Сворачиваем текущий
+          collapseKey(key);
+          if (openReviewKey === String(key)) openReviewKey = null;
+          // On mobile, auto-scroll to the top of the widget after collapsing
+          if (window.innerWidth <= 639) {
+            const widget = document.getElementById('yc-widget');
+            if (widget) {
+              window.scrollTo({ top: widget.offsetTop - 170, behavior: 'smooth' });
+            }
+          }
+        }
+        // Update swipe areas height if on mobile
+        if (window.innerWidth <= 639 && window.updateSwipeAreas) window.updateSwipeAreas();
+      },
+      toggleReview: (itemId) => {
+        // Совместимость: itemId имеет вид 'review-<key>' — извлечём key и делегируем
+        try {
+          const key = (itemId && String(itemId).startsWith('review-')) ? String(itemId).slice(7) : null;
+          if (key) return window.__yclients_widget.toggleReviewByKey(key);
+        } catch(_){ }
+        // Фолбэк: найдём data-review-key у контейнера
+        const currentEl = document.getElementById(itemId);
+        const key = currentEl ? (currentEl.getAttribute('data-review-key') || null) : null;
+        if (key) return window.__yclients_widget.toggleReviewByKey(String(key));
+      }
+    };
+  })();
+  </script>
