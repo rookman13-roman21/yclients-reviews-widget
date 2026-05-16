@@ -646,7 +646,7 @@ app.get('/trainers', async (req, res) => {
 
     let out = Array.from(trainers.values()).map(t => ({
       id: String(t.id), name: t.name || `Тренер ${t.id}`, count: t.count || 0,
-      enabled: (typeof t.enabled === 'boolean') ? t.enabled : true
+      enabled: disabledSet.has(String(t.id)) ? false : ((typeof t.enabled === 'boolean') ? t.enabled : true)
     }));
 
     // Apply name overrides
@@ -662,6 +662,17 @@ app.get('/trainers', async (req, res) => {
     } catch (_) {}
 
     out.sort((a, b) => String(a.name || '').localeCompare(String(b.name || '')));
+
+    // Filter by active staff from YClients (fired=0)
+    try {
+      const rawActive = await KV.get('staff:active_ids');
+      if (rawActive) {
+        const activeSet = new Set(JSON.parse(rawActive));
+        if (activeSet.size > 0) {
+          out = out.filter(t => activeSet.has(String(t.id)));
+        }
+      }
+    } catch (_) {}
 
     const includeZero = req.query.include_zero === '1' || req.query.include_zero === 'true';
     const includeDisabled = req.query.include_disabled === '1' || req.query.include_disabled === 'true';
@@ -851,15 +862,20 @@ app.post('/admin/refresh-staff', async (req, res) => {
   if (!found) return res.status(502).json({ error: 'staff_list_not_found', tried: urlTried });
 
   const map = {};
+  const activeIds = [];
   for (const s of found) {
     const id = s.id || s.staff_id || s.master_id || null;
     const name = s.name || s.full_name || (s.first_name && s.last_name ? `${s.first_name} ${s.last_name}` : null) || null;
-    if (id && name) map[String(id)] = String(name);
+    if (id && name) {
+      map[String(id)] = String(name);
+      if (!s.fired) activeIds.push(String(id));
+    }
   }
 
   await KV.put('staff:map', JSON.stringify(map));
+  if (activeIds.length) await KV.put('staff:active_ids', JSON.stringify(activeIds));
   __staffCache = { ts: Date.now(), map };
-  res.json({ ok: true, stored: Object.keys(map).length, tried: urlTried });
+  res.json({ ok: true, stored: Object.keys(map).length, active: activeIds.length, tried: urlTried });
 });
 
 // POST /admin/clean-short
@@ -1000,15 +1016,20 @@ async function cronRefreshStaff() {
 
     if (!found) return;
     const map = {};
+    const activeIds = [];
     for (const s of found) {
       const id = s.id || s.staff_id || null;
       const name = s.name || s.full_name || null;
-      if (id && name) map[String(id)] = String(name);
+      if (id && name) {
+        map[String(id)] = String(name);
+        if (!s.fired) activeIds.push(String(id));
+      }
     }
     if (Object.keys(map).length) {
       await KV.put('staff:map', JSON.stringify(map));
+      if (activeIds.length) await KV.put('staff:active_ids', JSON.stringify(activeIds));
       __staffCache = { ts: Date.now(), map };
-      console.log(`[cron] Staff map refreshed: ${Object.keys(map).length} entries`);
+      console.log(`[cron] Staff map refreshed: ${Object.keys(map).length} entries, active: ${activeIds.length}`);
     }
   } catch (e) {
     console.error('[cron] Staff refresh error:', e.message);

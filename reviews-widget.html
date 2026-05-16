@@ -1,14 +1,42 @@
+<!--
+  reviews-widget.html — Виджет отзывов МШБ (baristaschool.ru)
+  ─────────────────────────────────────────────────────────────
+  Назначение : вставляется как HTML-блок в Tilda на страницу отзывов.
+               НЕ хранится на сервере, деплой = замена кода в Tilda.
+
+  Что делает : загружает отзывы с YClients через прокси-сервер
+               (api.barista-school.ru → Node.js на 5.35.93.225).
+               Двухэтапная загрузка: первые 20 отзывов быстро,
+               затем фоновая догрузка всех.
+               Фильтр по тренеру, слайдер, hover-попапы тренеров.
+
+  Прокси     : https://api.barista-school.ru  (PM2: barista-reviews)
+  Компания   : YClients company_id 453962 (МШБ)
+
+  Ключевые константы (в начале <script>):
+    WORKER_URL          — URL прокси
+    API_KEY             — X-API-Key (= YCLIENTS_READ_KEY в .env сервера)
+    TRAINER_VISIBILITY  — какие тренеры видны в фильтре (1/0)
+    TRAINER_POPUPS      — якоря попапов тренеров в Tilda (#roman, #nikita…)
+    STAFF_FALLBACK      — имена тренеров если /trainers недоступен
+
+  Безопасность: author/master экранируются через escapeHtml() → нет XSS.
+-->
   <!-- YCLIENTS reviews widget for Tilda (new version with pagination, avatars, ratings) -->
   <div id="yc-widget" aria-live="polite" data-field-container-value="grid" data-field-left-value="20" data-field-axisx-value="left" data-field-container-res-320-value="window" data-field-left-res-320-value="20" data-field-left-res-480-value="20" data-field-left-res-640-value="20" data-field-left-res-960-value="20" data-fields="left,container,axisx">
-    <div id="yc-filter" style="margin-bottom:10px;display:flex;align-items:center">
-      <label for="yc-trainer-select" style="font-size:13px;color:#666;margin-right:5px">Выбрать тренера:</label>
-      <select id="yc-trainer-select" style="padding:6px;border-radius:5px;border:1px solid #ddd;background:#fff;font-size:14px;margin-right:20px;width:200px">
+    <div class="yc-heading">
+      <div class="yc-heading__label">Отзывы</div>
+      <h2 class="yc-heading__title">Отзывы наших учеников</h2>
+    </div>
+    <div id="yc-filter">
+      <label for="yc-trainer-select" class="yc-filter-label">Выбрать тренера:</label>
+      <select id="yc-trainer-select">
         <option value="">Все</option>
       </select>
-      <div id="yc-rating-filter" style="display:none">
-        <span style="font-size:13px;color:#666;margin-right:4px">Оценка:</span>
-        <span id="yc-rating-all" style="cursor:pointer;font-size:13px;font-weight:500;color:#CC2841;margin-right:4px">все</span>
-        <div class="yc-rating-stars" style="display:flex;gap:1px">
+      <div id="yc-rating-filter">
+        <span class="yc-rating-label">Оценка:</span>
+        <span id="yc-rating-all" class="yc-rating-all">все</span>
+        <div class="yc-rating-stars">
           <span class="yc-rating-star" data-rating="1">&#9733;</span>
           <span class="yc-rating-star" data-rating="2">&#9733;</span>
           <span class="yc-rating-star" data-rating="3">&#9733;</span>
@@ -16,8 +44,8 @@
           <span class="yc-rating-star" data-rating="5">&#9733;</span>
         </div>
       </div>
-      <div class="yc-count" style="font-size:13px;color:#666"></div>
-      <div class="yc-nav-buttons" style="display:flex;gap:5px;margin-left:20px;">
+      <div class="yc-count"></div>
+      <div class="yc-nav-buttons">
         <button class="yc-nav-prev" title="Предыдущие отзывы"></button>
         <button class="yc-nav-next" title="Следующие отзывы"></button>
       </div>
@@ -28,7 +56,7 @@
 
   <style>
     #yc-widget{
-      font-family:'Circe',Arial,Helvetica,sans-serif;
+      font-family:'Mulish',Arial,Helvetica,sans-serif;
       /* внутри колонки Tilda, без фулл-блида */
       width: 100%;
       position:relative;
@@ -38,8 +66,43 @@
       padding:8px 0;
       box-sizing:border-box;
     }
+    /* Heading */
+    .yc-heading { margin-bottom: 20px; }
+    .yc-heading__label {
+      display: inline-flex;
+      align-items: center;
+      margin-bottom: 14px;
+      padding: 7px 16px;
+      border-radius: 999px;
+      background: rgba(231,242,227,0.95);
+      color: #417033;
+      font-size: 13px;
+      line-height: 1;
+      font-weight: 900;
+    }
+    .yc-heading__title {
+      font-family: 'Mulish', Arial, Helvetica, sans-serif;
+      font-size: 34px;
+      font-weight: 900;
+      line-height: 1;
+      letter-spacing: -0.04em;
+      color: #1F1F1F;
+      margin: 0;
+    }
+    @media (max-width: 820px) {
+      .yc-heading__title { font-size: 26px; }
+    }
+    /* Filter row */
+    #yc-filter { margin-bottom:10px; display:flex; align-items:center; }
+    .yc-filter-label { font-size:13px; font-weight:600; color:#555; margin-right:5px; font-family:'Mulish',Arial,sans-serif; }
+    #yc-trainer-select { padding:6px 28px 6px 10px; border-radius:8px; border:1.5px solid #e0e0e0; background:#fff; font-size:13px; font-weight:600; color:#1F1F1F; margin-right:20px; width:200px; font-family:'Mulish',Arial,sans-serif; }
+    #yc-rating-filter { display:none; }
+    .yc-rating-label { font-size:13px; color:#555; margin-right:4px; }
+    .yc-rating-all { cursor:pointer; font-size:13px; font-weight:500; color:#CC2841; margin-right:4px; }
+    .yc-rating-stars { display:flex; gap:1px; }
+    .yc-count { font-size:13px; font-weight:600; color:#555; }
+    .yc-nav-buttons { display:flex; gap:5px; margin-left:20px; }
     .yc-header{display:flex;align-items:center;justify-content:space-between;margin-bottom:8px}
-    /* Hide the header title */
     #yc-widget .yc-header { display: none; }
     #yc-list{
       position:relative;
@@ -55,22 +118,19 @@
     .yc-track{ -ms-overflow-style: none; scrollbar-width: none; }
     /* Make each review appear as a card */
   /* Cards stretch to column width; height adapts to content */
-  .yc-item{width:100%;background:#fff;border:1px solid #eee;padding:20px;border-radius:12px;box-shadow:0 6px 18px rgba(0,0,0,0.06);display:flex;flex-direction:column;gap:12px;align-items:flex-start;box-sizing:border-box;max-width:100%}
+  .yc-item{width:100%;background:#fff;border:1px solid #f0f0f0;padding:24px;border-radius:18px;box-shadow:0 4px 16px rgba(31,31,31,0.07);display:flex;flex-direction:column;gap:12px;align-items:flex-start;box-sizing:border-box;max-width:100%;transition:box-shadow 0.2s,transform 0.2s}
+  .yc-item:hover{box-shadow:0 8px 28px rgba(31,31,31,0.13);transform:translateY(-2px)}
+  .yc-loading .yc-item{transition:none!important}
+  .yc-loading .yc-item:hover{box-shadow:0 4px 16px rgba(31,31,31,0.07)!important;transform:none!important}
     .yc-item .yc-content{flex:1;display:flex;flex-direction:column}
-    /* .yc-item .yc-meta{margin-bottom:8px} */ /* removed duplicate */
-    .yc-slider-btn{background:#007bff;color:#fff;border:0;padding:8px 10px;border-radius:8px;cursor:pointer;font-size:16px}
     .yc-slider-btn:disabled{opacity:0.45;cursor:not-allowed}
-  /* Width on mobile is controlled by .yc-group; cards keep width:100% */
-  @media (max-width:959px){ }
-  /* Removed duplicate .yc-item rule to avoid conflicting gap/padding definitions */
-  /* Original .yc-item defined above with gap:12px and box-shadow:0 6px 18px; keep that one for consistency */
   .yc-avatar{width:50px;height:50px;border-radius:50%;object-fit:cover}
   /* Hide avatars on all devices */
   .yc-avatar { display: none; }
   .yc-content{flex:1;min-width:0}
-    .yc-meta{font-size:13px;color:#666;margin-bottom:10px;display:flex;gap:5px;align-items:center;flex-wrap:wrap}
+    .yc-meta{font-size:13px;color:#555;margin-bottom:10px;display:flex;gap:5px;align-items:center;flex-wrap:wrap}
   /* Use pre-line to collapse excessive blank lines while preserving intentional line breaks */
-  .yc-text{font-size:16px;color:#333;white-space:pre-line;line-height:1.5;margin-bottom:0;overflow-wrap:anywhere;word-break:break-word}
+  .yc-text{font-size:15px;font-weight:500;color:#1F1F1F;white-space:pre-line;line-height:1.5;letter-spacing:-0.01em;margin-bottom:0;overflow-wrap:anywhere;word-break:break-word}
     /* Ensure exact 20px bottom spacing: last child inside content has no extra margin */
     .yc-content > :last-child { margin-bottom: 0 !important; }
     .yc-text-truncated {position:relative}
@@ -87,8 +147,8 @@
     /* Inline spinner for loading */
     .yc-inline-spinner { display:inline-block; width:14px; height:14px; border:2px solid #E9B9C2; border-top-color:#CC2841; border-radius:50%; animation:ycspin 0.9s linear infinite; vertical-align:middle; margin-left:6px; margin-top:-3px; }
     @keyframes ycspin { from { transform:rotate(0deg);} to { transform:rotate(360deg);} }
-    .yc-empty{padding:20px;text-align:center;color:#888;font-size:15px}
-    .yc-refresh{background:none;border:0;color:#007bff;cursor:pointer;padding:8px;font-size:14px;font-family:'Circe',Arial,sans-serif}
+    .yc-empty{padding:20px;text-align:center;color:#888;font-size:15px;font-weight:500}
+    .yc-refresh{background:none;border:0;color:#4F883E;cursor:pointer;padding:8px;font-size:14px;font-family:'Mulish',Arial,sans-serif}
     .yc-rating {display:inline-flex;align-items:center;gap:3px}
     .yc-rating .star {color:#ddd;font-size:16px}
     .yc-rating .star.filled {color:#ffb400}
@@ -105,10 +165,10 @@
     .yc-rating-stars .yc-rating-star:hover {
       color: #ffb400;
     }
-    .yc-author, .yc-master {color:#555;font-weight:500}
+    .yc-author{color:#555;font-weight:600} .yc-master{color:#CC2841;font-weight:600}
     .yc-sep {color:#ccc}
-    .yc-page-btn {padding:8px 14px;border:1px solid #ddd;background:#fff;cursor:pointer;border-radius:6px;font-family:'Circe',Arial,Helvetica,sans-serif;font-size:14px}
-    .yc-page-btn.active {background:#007bff;color:#fff;border-color:#007bff}
+    .yc-page-btn {padding:8px 14px;border:1px solid #ddd;background:#fff;cursor:pointer;border-radius:999px;font-family:'Mulish',Arial,Helvetica,sans-serif;font-size:13px;font-weight:600}
+    .yc-page-btn.active {background:#CC2841;color:#fff;border-color:#CC2841}
     .yc-page-btn:disabled {color:#ccc;cursor:not-allowed}
     .yc-page-ellipsis {padding:0 8px;color:#666;font-size:14px}
 
@@ -137,15 +197,15 @@
     /* hide numeric pagination for slider variant */
     #yc-pagination { display: none !important; }
     /* show count text under header */
-    #yc-count { display: flex; align-items: center; white-space: nowrap; flex: 0 0 auto; color:#666; font-size:13px; }
+    #yc-count { display: flex; align-items: center; white-space: nowrap; flex: 0 0 auto; color:#555; font-size:13px; font-weight:600; }
 
     /* Navigation buttons for reviews */
     .yc-nav-buttons button {
-      width: 24px;
-      height: 24px;
-      border: 1px solid #ddd;
+      width: 28px;
+      height: 28px;
+      border: 1.5px solid #B6D8AB;
       background-color: #fff;
-      border-radius: 4px;
+      border-radius: 999px;
       cursor: pointer;
       display: flex;
       align-items: center;
@@ -154,8 +214,8 @@
       transition: background-color 0.2s, border-color 0.2s;
     }
     .yc-nav-buttons button:hover:not(:disabled) {
-      background-color: #f5f5f5;
-      border-color: #ccc;
+      background-color: #E7F2E3;
+      border-color: #4F883E;
     }
     .yc-nav-buttons button:disabled {
       opacity: 0.5;
@@ -174,12 +234,7 @@
       background-position: center;
     }
 
-    /* Stronger rules to ensure cards in the track keep fixed size (avoid being overridden) */
-    .yc-track{min-height:140px;background:transparent;margin-left:0px}
-    /* padding-left is controlled in JS; keep zero here to avoid double offset */
-    .yc-track{padding-left:0;box-sizing:border-box;overscroll-behavior-x:contain;overscroll-behavior-y:auto;touch-action:pan-y}
-  /* Snap к колонкам, а не к отдельным карточкам */
-  /* .yc-track > .yc-group{scroll-snap-align:start}  */
+    .yc-track{min-height:140px;background:transparent;margin-left:0;padding-left:0;box-sizing:border-box;overscroll-behavior-x:contain;overscroll-behavior-y:auto;touch-action:pan-y}
     .yc-slider-btn{z-index:4}
 
     /* Desktop: 20px от левого края Grid Container, как у текстового блока */
@@ -239,7 +294,7 @@
     /* Убираем margin-right: используем gap трека */
     .yc-item-small {
       /* Keep same paddings as large; height purely from content */
-      padding: 20px;
+      padding: 24px;
     }
     @media (max-width: 959px) {
       .yc-group {
@@ -454,7 +509,7 @@
       const letter = (firstLetter || '?').toUpperCase();
       const svg = `<svg width="60" height="60" viewBox="0 0 60 60" fill="none" xmlns="http://www.w3.org/2000/svg">
         <circle cx="30" cy="30" r="30" fill="#F8DDE1"/>
-        <text x="30" y="38" text-anchor="middle" fill="#CC2841" font-family="Circe, Arial, Helvetica, sans-serif" font-size="24" font-weight="600">${letter}</text>
+        <text x="30" y="38" text-anchor="middle" fill="#CC2841" font-family="Mulish, Arial, Helvetica, sans-serif" font-size="24" font-weight="600">${letter}</text>
       </svg>`;
       // btoa fails for non-Latin1 characters (e.g. Cyrillic in font names).
       // Use UTF-8 safe base64 encoder.
@@ -706,6 +761,8 @@
     async function loadInitial(){
       console.log('loadInitial called for trainer:', currentTrainer, 'window.innerWidth:', window.innerWidth);
 
+      const widgetEl = document.getElementById('yc-widget');
+      if (widgetEl) widgetEl.classList.add('yc-loading');
       listEl.innerHTML = '<div class="yc-empty">Загрузка...<span class="yc-inline-spinner"></span></div>';
       paginationEl.innerHTML = '';
       itemsBuffer = [];
@@ -749,6 +806,8 @@
         if (itemsBuffer.length === 0) {
           listEl.innerHTML = '<div class="yc-empty">Не удалось загрузить. <span style="text-decoration:underline;cursor:pointer" onclick="window.__yclients_widget.refresh()">Попробовать снова</span></div>';
         }
+      } finally {
+        if (widgetEl) widgetEl.classList.remove('yc-loading');
       }
     }
 
@@ -970,8 +1029,6 @@
         master_name: data.master_name || data.master || ''
       } : null);
 
-      console.log('Rendering item:', it.id, 'data:', data, 'compact:', c);
-
       // Handle client data
       let author = c.author_name || '';
       if (data.client) {
@@ -1029,7 +1086,7 @@
       }
 
       const midStr = String(c.master_id || '');
-      const authorHtml = author ? author : '';
+      const authorHtml = author ? escapeHtml(author) : '';
       let masterHtml = '';
       if (master) {
         const href = TRAINER_POPUPS[midStr];
