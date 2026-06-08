@@ -138,7 +138,7 @@ https://api.barista-school.ru/site-health/report?key=ADMIN_KEY&limit=500
 
 ### Серверные проверки
 
-По умолчанию раз в минуту проверяются:
+По умолчанию раз в минуту проверяются core/API URL:
 
 - `https://baristaschool.ru/`;
 - `https://baristaschool.ru/coffee_club`;
@@ -148,7 +148,42 @@ https://api.barista-school.ru/site-health/report?key=ADMIN_KEY&limit=500
 - `https://api.barista-school.ru/widgets/reviews.js`;
 - `https://api.barista-school.ru/static/karta-uchenikov/karta-uchenikov.js`.
 
-Список можно переопределить через env `SITE_HEALTH_CHECK_URLS`, интервал cron — через `SITE_HEALTH_CHECK_INTERVAL`, timeout — через `SITE_HEALTH_CHECK_TIMEOUT_MS`.
+По умолчанию раз в 15 минут проверяются service URL:
+
+- `/barista_courses`;
+- `/probarista`;
+- `/latte-art`;
+- `/expert`;
+- `/alternative`;
+- `/sence`;
+- `/group`;
+- `/master_open`;
+- `/business-intensive`;
+- `/open_coffeeshop`;
+- `/bar_engineering`;
+- `/regions`;
+- `/sca_menu`;
+- `/unique_menu`;
+- `/summer_drinks`;
+- `/home_barista_online`;
+- `/home_barista`;
+- `/barista_3`;
+- `/coffie_team`;
+- `/coffee_club`;
+- `/capping`;
+- `/tea_capping`;
+- `/master_doma`;
+- `/casino`;
+- `/excu`;
+- `/latte_art_battle`;
+- `/mbs_mixology_cup`.
+
+Список core URL можно переопределить через env `SITE_HEALTH_CHECK_URLS`, интервал cron — через `SITE_HEALTH_CHECK_INTERVAL`.
+Список service URL можно переопределить через env `SITE_HEALTH_SERVICE_CHECK_URLS`, интервал cron — через `SITE_HEALTH_SERVICE_CHECK_INTERVAL`.
+Timeout — через `SITE_HEALTH_CHECK_TIMEOUT_MS`.
+
+События серверных проверок получают поле `group`: `core`, `api` или `service`.
+Лог `site-health.jsonl` ротируется при 20 МБ в `site-health.jsonl.1`; старый `.1` заменяется новым, поэтому лог не растёт бесконечно.
 
 ### Ключевые эндпоинты сервера
 

@@ -23,8 +23,9 @@ const REVIEWS_SNAPSHOT_PAGE_SIZE = 200;
 const REVIEWS_SNAPSHOT_MAX_PAGES = 50;
 const REVIEWS_PUBLIC_CACHE_TTL = 300;
 const SITE_HEALTH_LOG_MAX_BYTES = 20 * 1024 * 1024;
-const SITE_HEALTH_MONITOR_VERSION = '20260608-1';
+const SITE_HEALTH_MONITOR_VERSION = '20260608-2';
 const SITE_HEALTH_CHECK_INTERVAL = process.env.SITE_HEALTH_CHECK_INTERVAL || '*/1 * * * *';
+const SITE_HEALTH_SERVICE_CHECK_INTERVAL = process.env.SITE_HEALTH_SERVICE_CHECK_INTERVAL || '*/15 * * * *';
 const SITE_HEALTH_CHECK_TIMEOUT_MS = Number(process.env.SITE_HEALTH_CHECK_TIMEOUT_MS || 10000);
 
 
@@ -48,6 +49,35 @@ const SITE_HEALTH_CHECK_URLS = (process.env.SITE_HEALTH_CHECK_URLS || [
   'https://api.barista-school.ru/health',
   'https://api.barista-school.ru/widgets/reviews.js',
   'https://api.barista-school.ru/static/karta-uchenikov/karta-uchenikov.js'
+].join(',')).split(',').map(s => s.trim()).filter(Boolean);
+const SITE_HEALTH_SERVICE_CHECK_URLS = (process.env.SITE_HEALTH_SERVICE_CHECK_URLS || [
+  'https://baristaschool.ru/barista_courses',
+  'https://baristaschool.ru/probarista',
+  'https://baristaschool.ru/latte-art',
+  'https://baristaschool.ru/expert',
+  'https://baristaschool.ru/alternative',
+  'https://baristaschool.ru/sence',
+  'https://baristaschool.ru/group',
+  'https://baristaschool.ru/master_open',
+  'https://baristaschool.ru/business-intensive',
+  'https://baristaschool.ru/open_coffeeshop',
+  'https://baristaschool.ru/bar_engineering',
+  'https://baristaschool.ru/regions',
+  'https://baristaschool.ru/sca_menu',
+  'https://baristaschool.ru/unique_menu',
+  'https://baristaschool.ru/summer_drinks',
+  'https://baristaschool.ru/home_barista_online',
+  'https://baristaschool.ru/home_barista',
+  'https://baristaschool.ru/barista_3',
+  'https://baristaschool.ru/coffie_team',
+  'https://baristaschool.ru/coffee_club',
+  'https://baristaschool.ru/capping',
+  'https://baristaschool.ru/tea_capping',
+  'https://baristaschool.ru/master_doma',
+  'https://baristaschool.ru/casino',
+  'https://baristaschool.ru/excu',
+  'https://baristaschool.ru/latte_art_battle',
+  'https://baristaschool.ru/mbs_mixology_cup'
 ].join(',')).split(',').map(s => s.trim()).filter(Boolean);
 
 // ─── Staff maps (hardcoded fallbacks, same as original) ─────────────────────
@@ -330,12 +360,14 @@ function buildSiteHealthSummary(events) {
   const byType = {};
   const byPage = {};
   const byResource = {};
+  const byGroup = {};
   let failures = 0;
   let slow = 0;
   for (const ev of events) {
     byType[ev.type] = (byType[ev.type] || 0) + 1;
     if (ev.page) byPage[ev.page] = (byPage[ev.page] || 0) + 1;
     if (ev.resource) byResource[ev.resource] = (byResource[ev.resource] || 0) + 1;
+    if (ev.group) byGroup[ev.group] = (byGroup[ev.group] || 0) + 1;
     if (ev.ok === false || /error|missing|timeout|failed|problem/i.test(ev.type || '')) failures++;
     if (Number(ev.duration_ms || 0) >= 10000) slow++;
   }
@@ -346,6 +378,7 @@ function buildSiteHealthSummary(events) {
     slow,
     by_type: top(byType),
     by_page: top(byPage),
+    by_group: top(byGroup),
     by_resource: top(byResource)
   };
 }
@@ -1625,7 +1658,7 @@ async function cronCleanShort() {
   }
 }
 
-async function siteHealthFetchCheck(url) {
+async function siteHealthFetchCheck(url, group = 'core') {
   const started = Date.now();
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), SITE_HEALTH_CHECK_TIMEOUT_MS);
@@ -1644,6 +1677,7 @@ async function siteHealthFetchCheck(url) {
       iso: new Date().toISOString(),
       type: 'server_check',
       source: 'server',
+      group,
       ok: resp.ok,
       resource: sanitizeUrl(url),
       status: resp.status,
@@ -1656,6 +1690,7 @@ async function siteHealthFetchCheck(url) {
       iso: new Date().toISOString(),
       type: 'server_check_error',
       source: 'server',
+      group,
       ok: false,
       resource: sanitizeUrl(url),
       duration_ms: Date.now() - started,
@@ -1669,7 +1704,14 @@ async function siteHealthFetchCheck(url) {
 
 async function cronSiteHealthChecks() {
   for (const url of SITE_HEALTH_CHECK_URLS) {
-    await siteHealthFetchCheck(url);
+    const group = url.includes('api.barista-school.ru') ? 'api' : 'core';
+    await siteHealthFetchCheck(url, group);
+  }
+}
+
+async function cronSiteHealthServiceChecks() {
+  for (const url of SITE_HEALTH_SERVICE_CHECK_URLS) {
+    await siteHealthFetchCheck(url, 'service');
   }
 }
 
@@ -1708,9 +1750,17 @@ if (!DISABLE_CRON) {
     }
   });
 
+  cron.schedule(SITE_HEALTH_SERVICE_CHECK_INTERVAL, async () => {
+    try {
+      await cronSiteHealthServiceChecks();
+    } catch (e) {
+      console.error('[cron] Site health service checks failed:', e.message);
+    }
+  });
+
   refreshReviewsSnapshot().catch(e => console.error('[startup] Reviews snapshot warmup failed:', e.message));
   cronSiteHealthChecks().catch(e => console.error('[startup] Site health checks failed:', e.message));
-  console.log('[cron] Scheduled tasks enabled (staff every 6 hours, reviews daily, site health every minute)');
+  console.log('[cron] Scheduled tasks enabled (staff every 6 hours, reviews daily, site health core every minute, services every 15 minutes)');
 }
 
 // ─── Start server ───────────────────────────────────────────────────────────
