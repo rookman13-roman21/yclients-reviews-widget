@@ -22,6 +22,10 @@ const REVIEWS_SNAPSHOT_TTL_MS = 24 * 60 * 60 * 1000;
 const REVIEWS_SNAPSHOT_PAGE_SIZE = 200;
 const REVIEWS_SNAPSHOT_MAX_PAGES = 50;
 const REVIEWS_PUBLIC_CACHE_TTL = 300;
+const SITE_HEALTH_LOG_MAX_BYTES = 20 * 1024 * 1024;
+const SITE_HEALTH_MONITOR_VERSION = '20260608-1';
+const SITE_HEALTH_CHECK_INTERVAL = process.env.SITE_HEALTH_CHECK_INTERVAL || '*/1 * * * *';
+const SITE_HEALTH_CHECK_TIMEOUT_MS = Number(process.env.SITE_HEALTH_CHECK_TIMEOUT_MS || 10000);
 
 
 // Env vars (set via .env or system environment)
@@ -36,6 +40,15 @@ const CRON_CLEAN_LIMIT = Math.min(200, Number(process.env.CRON_CLEAN_LIMIT || 50
 const DISABLE_CRON = process.env.DISABLE_CRON === '1';
 
 const ALLOWED_ORIGINS = (process.env.ALLOWED_ORIGINS || 'https://baristaschool.ru,https://www.baristaschool.ru,https://api.baristaschool.ru,https://barista-school.ru,https://www.barista-school.ru,https://api.barista-school.ru').split(',').map(s => s.trim()).filter(Boolean);
+const SITE_HEALTH_CHECK_URLS = (process.env.SITE_HEALTH_CHECK_URLS || [
+  'https://baristaschool.ru/',
+  'https://baristaschool.ru/coffee_club',
+  'https://baristaschool.ru/excu',
+  'https://baristaschool.ru/latte_art_battle',
+  'https://api.barista-school.ru/health',
+  'https://api.barista-school.ru/widgets/reviews.js',
+  'https://api.barista-school.ru/static/karta-uchenikov/karta-uchenikov.js'
+].join(',')).split(',').map(s => s.trim()).filter(Boolean);
 
 // ─── Staff maps (hardcoded fallbacks, same as original) ─────────────────────
 
@@ -56,6 +69,7 @@ const ID_OVERRIDES = {
 
 const dataDir = path.join(__dirname, 'data');
 if (!fs.existsSync(dataDir)) fs.mkdirSync(dataDir, { recursive: true });
+const siteHealthLogPath = path.join(dataDir, 'site-health.jsonl');
 
 const KV = new KVStore(path.join(dataDir, 'kv.db'));
 
@@ -89,6 +103,7 @@ app.use((req, res, next) => {
 let __staffCache = { ts: 0, map: {} };
 let __nameOvCache = { ts: 0, map: {} };
 let __reviewsSnapshotRefreshPromise = null;
+const __siteHealthRate = new Map();
 
 // Simple response cache (replaces caches.default)
 const responseCache = new Map();
@@ -214,6 +229,331 @@ function checkReadKey(req) {
   if (!YCLIENTS_READ_KEY) return true;
   const key = req.headers['x-api-key'] || '';
   return String(key) === String(YCLIENTS_READ_KEY);
+}
+
+function checkSiteHealthOrigin(req) {
+  const origin = req.headers['origin'] || req.headers['referer'] || '';
+  if (!origin) return true;
+  return ALLOWED_ORIGINS.some(o => origin.startsWith(o));
+}
+
+function truncateString(value, max = 500) {
+  if (value === null || typeof value === 'undefined') return null;
+  return String(value).slice(0, max);
+}
+
+function sanitizeUrl(value) {
+  if (!value) return null;
+  try {
+    const u = new URL(String(value), 'https://baristaschool.ru');
+    return u.origin + u.pathname;
+  } catch (_) {
+    return truncateString(value, 300);
+  }
+}
+
+function sanitizeHealthEvent(input, req) {
+  const body = input && typeof input === 'object' ? input : {};
+  const now = Date.now();
+  const type = truncateString(body.type || 'event', 80) || 'event';
+  const page = sanitizeUrl(body.page || body.href || body.path || '');
+  const resource = sanitizeUrl(body.resource || body.url || body.src || '');
+  const ipRaw = String((req.headers['x-forwarded-for'] || req.socket.remoteAddress || '')).split(',')[0].trim();
+
+  const out = {
+    ts: now,
+    iso: new Date(now).toISOString(),
+    type,
+    ok: typeof body.ok === 'boolean' ? body.ok : undefined,
+    page,
+    path: truncateString(body.path || '', 240),
+    resource,
+    status: Number.isFinite(Number(body.status)) ? Number(body.status) : undefined,
+    duration_ms: Number.isFinite(Number(body.duration_ms)) ? Math.round(Number(body.duration_ms)) : undefined,
+    message: truncateString(body.message || body.reason || '', 500),
+    detail: truncateString(body.detail || '', 500),
+    widget: truncateString(body.widget || '', 80),
+    selector: truncateString(body.selector || '', 160),
+    browser: truncateString(body.browser || '', 120),
+    user_agent: truncateString(body.user_agent || req.headers['user-agent'] || '', 240),
+    referrer: sanitizeUrl(body.referrer || req.headers['referer'] || ''),
+    source: truncateString(body.source || 'browser', 40),
+    version: truncateString(body.version || SITE_HEALTH_MONITOR_VERSION, 40),
+    ip_hash: ipRaw ? crypto.createHash('sha256').update(ipRaw).digest('hex').slice(0, 16) : null
+  };
+
+  Object.keys(out).forEach(k => {
+    if (typeof out[k] === 'undefined' || out[k] === '') delete out[k];
+  });
+  return out;
+}
+
+async function appendSiteHealthEvent(event) {
+  try {
+    if (fs.existsSync(siteHealthLogPath)) {
+      const stat = fs.statSync(siteHealthLogPath);
+      if (stat.size > SITE_HEALTH_LOG_MAX_BYTES) {
+        const rotated = siteHealthLogPath + '.1';
+        try { if (fs.existsSync(rotated)) fs.unlinkSync(rotated); } catch (_) {}
+        fs.renameSync(siteHealthLogPath, rotated);
+      }
+    }
+    await fs.promises.appendFile(siteHealthLogPath, JSON.stringify(event) + '\n', 'utf8');
+  } catch (e) {
+    console.error('[site-health] append failed:', e.message);
+  }
+}
+
+function readRecentSiteHealthEvents(limit = 500) {
+  if (!fs.existsSync(siteHealthLogPath)) return [];
+  const maxBytes = 5 * 1024 * 1024;
+  const stat = fs.statSync(siteHealthLogPath);
+  const fd = fs.openSync(siteHealthLogPath, 'r');
+  try {
+    const size = Math.min(stat.size, maxBytes);
+    const buffer = Buffer.alloc(size);
+    fs.readSync(fd, buffer, 0, size, Math.max(0, stat.size - size));
+    return buffer.toString('utf8')
+      .split('\n')
+      .filter(Boolean)
+      .slice(-limit)
+      .map(line => {
+        try { return JSON.parse(line); } catch (_) { return null; }
+      })
+      .filter(Boolean);
+  } finally {
+    fs.closeSync(fd);
+  }
+}
+
+function buildSiteHealthSummary(events) {
+  const byType = {};
+  const byPage = {};
+  const byResource = {};
+  let failures = 0;
+  let slow = 0;
+  for (const ev of events) {
+    byType[ev.type] = (byType[ev.type] || 0) + 1;
+    if (ev.page) byPage[ev.page] = (byPage[ev.page] || 0) + 1;
+    if (ev.resource) byResource[ev.resource] = (byResource[ev.resource] || 0) + 1;
+    if (ev.ok === false || /error|missing|timeout|failed|problem/i.test(ev.type || '')) failures++;
+    if (Number(ev.duration_ms || 0) >= 10000) slow++;
+  }
+  const top = obj => Object.entries(obj).sort((a, b) => b[1] - a[1]).slice(0, 20).map(([key, count]) => ({ key, count }));
+  return {
+    total: events.length,
+    failures,
+    slow,
+    by_type: top(byType),
+    by_page: top(byPage),
+    by_resource: top(byResource)
+  };
+}
+
+function getSiteHealthMonitorScript() {
+  return `// MBS site health monitor ${SITE_HEALTH_MONITOR_VERSION}
+(function() {
+  'use strict';
+  if (window.__mbsSiteHealthMonitor) return;
+  window.__mbsSiteHealthMonitor = true;
+
+  var VERSION = ${JSON.stringify(SITE_HEALTH_MONITOR_VERSION)};
+  var ENDPOINT = 'https://api.barista-school.ru/site-health/event';
+  var MAX_EVENTS = 24;
+  var SLOW_PAGE_MS = 12000;
+  var SLOW_FETCH_MS = 10000;
+  var SLOW_RESOURCE_MS = 8000;
+  var sent = 0;
+
+  function now() {
+    return (window.performance && performance.now) ? performance.now() : Date.now();
+  }
+
+  function browserName() {
+    var ua = navigator.userAgent || '';
+    if (/Safari/i.test(ua) && !/Chrome|Chromium|CriOS|Android/i.test(ua)) return 'Safari';
+    if (/Chrome|CriOS/i.test(ua)) return 'Chrome';
+    if (/Firefox/i.test(ua)) return 'Firefox';
+    return 'Other';
+  }
+
+  function cleanUrl(value) {
+    if (!value) return '';
+    try {
+      var u = new URL(String(value), location.href);
+      return u.origin + u.pathname;
+    } catch (e) {
+      return String(value).slice(0, 300);
+    }
+  }
+
+  function importantUrl(value) {
+    var s = String(value || '');
+    return /api\\.barista-school\\.ru|baristaschool\\.ru|static\\.tildacdn\\.com|forma\\.tinkoff\\.ru|mod\\.calltouch\\.ru|cdn-ru\\.bitrix24\\.ru|yandex\\.ru|googletagmanager\\.com/i.test(s);
+  }
+
+  function send(type, data) {
+    if (sent >= MAX_EVENTS) return;
+    sent += 1;
+    var payload = Object.assign({
+      type: type,
+      page: cleanUrl(location.href),
+      path: location.pathname,
+      referrer: cleanUrl(document.referrer || ''),
+      browser: browserName(),
+      user_agent: (navigator.userAgent || '').slice(0, 240),
+      source: 'browser',
+      version: VERSION
+    }, data || {});
+    var json = JSON.stringify(payload);
+    try {
+      if (navigator.sendBeacon) {
+        var blob = new Blob([json], { type: 'application/json' });
+        if (navigator.sendBeacon(ENDPOINT, blob)) return;
+      }
+    } catch (e) {}
+    try {
+      fetch(ENDPOINT, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: json,
+        keepalive: true
+      }).catch(function() {});
+    } catch (e) {}
+  }
+
+  window.addEventListener('error', function(e) {
+    var target = e.target || e.srcElement;
+    if (target && target !== window) {
+      var resource = target.src || target.href || '';
+      if (resource && importantUrl(resource)) {
+        send('resource_error', {
+          resource: cleanUrl(resource),
+          detail: (target.tagName || '').toLowerCase()
+        });
+      }
+      return;
+    }
+    send('js_error', {
+      message: String(e.message || 'JS error').slice(0, 500),
+      resource: cleanUrl(e.filename || ''),
+      detail: [e.lineno || 0, e.colno || 0].join(':')
+    });
+  }, true);
+
+  window.addEventListener('unhandledrejection', function(e) {
+    var reason = e.reason && (e.reason.message || e.reason.stack || e.reason);
+    send('promise_error', { message: String(reason || 'Unhandled promise rejection').slice(0, 500) });
+  });
+
+  if (window.fetch) {
+    var originalFetch = window.fetch;
+    window.fetch = function(input, init) {
+      var url = (typeof input === 'string') ? input : (input && input.url) || '';
+      var started = now();
+      return originalFetch.apply(this, arguments).then(function(resp) {
+        var duration = Math.round(now() - started);
+        if (importantUrl(url) && (!resp.ok || duration >= SLOW_FETCH_MS)) {
+          send('fetch_problem', {
+            resource: cleanUrl(url),
+            status: resp.status,
+            ok: resp.ok,
+            duration_ms: duration
+          });
+        }
+        return resp;
+      }).catch(function(err) {
+        if (importantUrl(url)) {
+          send('fetch_error', {
+            resource: cleanUrl(url),
+            ok: false,
+            duration_ms: Math.round(now() - started),
+            message: String(err && err.message || err || 'fetch failed').slice(0, 500)
+          });
+        }
+        throw err;
+      });
+    };
+  }
+
+  function navTimings() {
+    var nav = performance && performance.getEntriesByType ? performance.getEntriesByType('navigation')[0] : null;
+    if (nav) {
+      return {
+        duration_ms: Math.round(nav.duration || 0),
+        detail: 'dom=' + Math.round(nav.domContentLoadedEventEnd || 0) + ';load=' + Math.round(nav.loadEventEnd || 0)
+      };
+    }
+    if (performance && performance.timing) {
+      var t = performance.timing;
+      return { duration_ms: Math.max(0, t.loadEventEnd - t.navigationStart) };
+    }
+    return {};
+  }
+
+  function checkResources() {
+    if (!performance || !performance.getEntriesByType) return;
+    var entries = performance.getEntriesByType('resource') || [];
+    entries.forEach(function(r) {
+      if (!r || !importantUrl(r.name)) return;
+      var duration = Math.round(r.duration || 0);
+      if (duration >= SLOW_RESOURCE_MS) {
+        send('slow_resource', {
+          resource: cleanUrl(r.name),
+          duration_ms: duration,
+          detail: r.initiatorType || ''
+        });
+      }
+    });
+  }
+
+  var widgets = [
+    { name: 'reviews', selectors: ['#mbs-reviews-widget', '#yc-widget'] },
+    { name: 'projects_map', selectors: ['#mbs-cases-map-widget'] },
+    { name: 'events_schedule', selectors: ['#mbs-events-widget', '.mbs-events-widget'] },
+    { name: 'courses_widget', selectors: ['#mbs-courses-widget', '.mbs-courses-widget'] },
+    { name: 'booking_widget', selectors: ['#bbb-widget', '#barista-booking-widget', '.bbb-widget', '.basic-barista-widget', '[data-booking-url]'] },
+    { name: 'photo_gallery', selectors: ['#mbs-photo-gallery', '.mbs-gallery-widget', '[data-mbs-gallery]'] }
+  ];
+
+  function checkWidgets() {
+    widgets.forEach(function(w) {
+      var root = null;
+      var selector = '';
+      for (var i = 0; i < w.selectors.length; i++) {
+        root = document.querySelector(w.selectors[i]);
+        if (root) { selector = w.selectors[i]; break; }
+      }
+      if (!root) return;
+      var text = (root.innerText || root.textContent || '').slice(0, 300);
+      var rect = root.getBoundingClientRect ? root.getBoundingClientRect() : { height: 0 };
+      var problem = '';
+      if (/Не удалось|Попробовать снова|Ошибка|error|failed/i.test(text)) problem = 'error_text';
+      else if (/Загрузка|loading|skeleton/i.test(text) && rect.height > 40) problem = 'still_loading';
+      else if (rect.height < 20 && !text.trim()) problem = 'empty_root';
+      if (problem) {
+        send('widget_problem', {
+          widget: w.name,
+          selector: selector,
+          message: problem,
+          detail: text
+        });
+      }
+    });
+  }
+
+  window.addEventListener('load', function() {
+    var timing = navTimings();
+    send('page_load', Object.assign({ ok: true }, timing));
+    if (timing.duration_ms && timing.duration_ms >= SLOW_PAGE_MS) {
+      send('slow_page', Object.assign({ ok: false }, timing));
+    }
+    setTimeout(checkResources, 1500);
+  });
+
+  setTimeout(checkWidgets, 15000);
+})();
+`;
 }
 
 function yclientsFetch(url, opts = {}) {
@@ -435,6 +775,59 @@ app.use('/widgets', express.static(path.join(__dirname, 'public', 'widgets'), {
     }
   }
 }));
+
+// ─── Site health monitor ────────────────────────────────────────────────────
+
+app.get('/site-health/monitor.js', (req, res) => {
+  res.set({
+    'Content-Type': 'application/javascript; charset=utf-8',
+    'Cache-Control': 'public, max-age=300, stale-while-revalidate=3600'
+  });
+  res.send(getSiteHealthMonitorScript());
+});
+
+app.post('/site-health/event', async (req, res) => {
+  try {
+    if (!checkSiteHealthOrigin(req)) return res.status(403).json({ error: 'forbidden' });
+
+    const ipRaw = String((req.headers['x-forwarded-for'] || req.socket.remoteAddress || '')).split(',')[0].trim();
+    const bucket = Math.floor(Date.now() / 60000);
+    const rateKey = ipRaw + ':' + bucket;
+    const current = (__siteHealthRate.get(rateKey) || 0) + 1;
+    __siteHealthRate.set(rateKey, current);
+    if (__siteHealthRate.size > 5000) {
+      for (const key of __siteHealthRate.keys()) {
+        if (!key.endsWith(':' + bucket)) __siteHealthRate.delete(key);
+      }
+    }
+    if (current > 120) return res.status(429).json({ error: 'rate_limited' });
+
+    const event = sanitizeHealthEvent(req.body, req);
+    await appendSiteHealthEvent(event);
+    res.json({ ok: true });
+  } catch (e) {
+    res.status(500).json({ error: 'site_health_failed', detail: e.message });
+  }
+});
+
+app.get('/site-health/report', async (req, res) => {
+  const queryKey = req.query.key || '';
+  const headerKey = req.headers['x-admin-key'] || req.headers['authorization']?.replace(/^Bearer\s+/i, '') || '';
+  if (!ADMIN_KEY || (String(queryKey) !== String(ADMIN_KEY) && String(headerKey) !== String(ADMIN_KEY))) {
+    return res.status(401).json({ error: 'unauthorized' });
+  }
+
+  const limit = Math.max(1, Math.min(5000, Number(req.query.limit || 500) || 500));
+  const events = readRecentSiteHealthEvents(limit);
+  res.json({
+    ok: true,
+    log: siteHealthLogPath,
+    version: SITE_HEALTH_MONITOR_VERSION,
+    checks: SITE_HEALTH_CHECK_URLS,
+    summary: buildSiteHealthSummary(events),
+    events
+  });
+});
 
 // ─── GET /reviews ───────────────────────────────────────────────────────────
 
@@ -1232,6 +1625,54 @@ async function cronCleanShort() {
   }
 }
 
+async function siteHealthFetchCheck(url) {
+  const started = Date.now();
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), SITE_HEALTH_CHECK_TIMEOUT_MS);
+  try {
+    const resp = await fetch(url, {
+      method: 'GET',
+      signal: controller.signal,
+      headers: {
+        'User-Agent': 'MBS-SiteHealth/1.0',
+        'Accept': 'text/html,application/javascript,application/json,text/plain,*/*'
+      }
+    });
+    const duration = Date.now() - started;
+    await appendSiteHealthEvent({
+      ts: Date.now(),
+      iso: new Date().toISOString(),
+      type: 'server_check',
+      source: 'server',
+      ok: resp.ok,
+      resource: sanitizeUrl(url),
+      status: resp.status,
+      duration_ms: duration,
+      version: SITE_HEALTH_MONITOR_VERSION
+    });
+  } catch (e) {
+    await appendSiteHealthEvent({
+      ts: Date.now(),
+      iso: new Date().toISOString(),
+      type: 'server_check_error',
+      source: 'server',
+      ok: false,
+      resource: sanitizeUrl(url),
+      duration_ms: Date.now() - started,
+      message: truncateString(e && e.message ? e.message : e, 500),
+      version: SITE_HEALTH_MONITOR_VERSION
+    });
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
+async function cronSiteHealthChecks() {
+  for (const url of SITE_HEALTH_CHECK_URLS) {
+    await siteHealthFetchCheck(url);
+  }
+}
+
 if (!DISABLE_CRON) {
   // Every 6 hours (like wrangler.toml cron 0 */6 * * *)
   cron.schedule('0 */6 * * *', async () => {
@@ -1259,8 +1700,17 @@ if (!DISABLE_CRON) {
     }
   });
 
+  cron.schedule(SITE_HEALTH_CHECK_INTERVAL, async () => {
+    try {
+      await cronSiteHealthChecks();
+    } catch (e) {
+      console.error('[cron] Site health checks failed:', e.message);
+    }
+  });
+
   refreshReviewsSnapshot().catch(e => console.error('[startup] Reviews snapshot warmup failed:', e.message));
-  console.log('[cron] Scheduled tasks enabled (staff every 6 hours, reviews daily)');
+  cronSiteHealthChecks().catch(e => console.error('[startup] Site health checks failed:', e.message));
+  console.log('[cron] Scheduled tasks enabled (staff every 6 hours, reviews daily, site health every minute)');
 }
 
 // ─── Start server ───────────────────────────────────────────────────────────

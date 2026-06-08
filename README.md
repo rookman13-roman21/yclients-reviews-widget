@@ -72,11 +72,92 @@ YClients API (company 453962)
 - блок не делает массовые запросы к API при каждой загрузке страницы;
 - если блок зависит от backend, у него есть timeout, fallback и кэш.
 
+## Мониторинг доступности сайта
+
+### Зачем
+
+Если `baristaschool.ru` или отдельные Tilda-блоки то грузятся, то не грузятся, мониторинг собирает факты из двух источников:
+
+- браузер посетителя: ошибки JS, незагрузившиеся ресурсы, зависшие виджеты, медленные API-запросы;
+- сервер: cron-проверки ключевых страниц и ресурсов раз в минуту.
+
+Мониторинг не пишет телефоны, email, содержимое форм и другие персональные данные. URL очищаются до `origin + pathname`, IP хранится только как короткий SHA-256 hash.
+
+### Код для Tilda
+
+Вставить один раз в общий HTML-код сайта Tilda, лучше в `Настройки сайта → Ещё → HTML-код перед закрывающим </body>`:
+
+```html
+<script defer src="https://api.barista-school.ru/site-health/monitor.js"></script>
+```
+
+Если нужно временно обойти кэш Safari/Tilda:
+
+```html
+<script defer src="https://api.barista-school.ru/site-health/monitor.js?v=20260608-1"></script>
+```
+
+### Что логируется
+
+| Событие | Когда появляется |
+|---|---|
+| `page_load` | Страница загрузилась в браузере |
+| `slow_page` | Загрузка страницы заняла больше 12 секунд |
+| `resource_error` | Не загрузился важный внешний JS/CSS/image |
+| `js_error` | Ошибка JavaScript на странице |
+| `promise_error` | Необработанная ошибка Promise |
+| `fetch_problem` | API-запрос вернул ошибку или шёл дольше 10 секунд |
+| `fetch_error` | API-запрос упал по сети/timeout |
+| `slow_resource` | Важный внешний ресурс грузился дольше 8 секунд |
+| `widget_problem` | Через 15 секунд root-блок виджета пустой, в skeleton или с текстом ошибки |
+| `server_check` | Серверная проверка URL раз в минуту |
+| `server_check_error` | Серверная проверка URL упала |
+
+### Где смотреть
+
+Лог на сервере:
+
+```text
+/root/app/data/site-health.jsonl
+```
+
+Защищённый отчёт:
+
+```bash
+curl -H "X-Admin-Key: $ADMIN_KEY" \
+  "https://api.barista-school.ru/site-health/report?limit=500"
+```
+
+Или в браузере:
+
+```text
+https://api.barista-school.ru/site-health/report?key=ADMIN_KEY&limit=500
+```
+
+`ADMIN_KEY` брать только из серверного `.env`, не вставлять в Tilda и не публиковать.
+
+### Серверные проверки
+
+По умолчанию раз в минуту проверяются:
+
+- `https://baristaschool.ru/`;
+- `https://baristaschool.ru/coffee_club`;
+- `https://baristaschool.ru/excu`;
+- `https://baristaschool.ru/latte_art_battle`;
+- `https://api.barista-school.ru/health`;
+- `https://api.barista-school.ru/widgets/reviews.js`;
+- `https://api.barista-school.ru/static/karta-uchenikov/karta-uchenikov.js`.
+
+Список можно переопределить через env `SITE_HEALTH_CHECK_URLS`, интервал cron — через `SITE_HEALTH_CHECK_INTERVAL`, timeout — через `SITE_HEALTH_CHECK_TIMEOUT_MS`.
+
 ### Ключевые эндпоинты сервера
 
 | URL | Описание |
 |-----|----------|
 | `GET /widgets/reviews.js` | Серверный JS-виджет для Tilda |
+| `GET /site-health/monitor.js` | Лёгкий браузерный мониторинг для Tilda |
+| `POST /site-health/event` | Приём событий доступности сайта |
+| `GET /site-health/report` | Защищённый отчёт по последним событиям |
 | `GET /trainers?include_zero=1` | Список тренеров из STAFF_MAP + KV |
 | `GET /reviews?count=N&page=N&staff_id=ID` | Первая страница отзывов из snapshot-кэша; `page>1` ограничен без `full=1` |
 | `GET /reviews-bundle` | Все отзывы из snapshot одним запросом |
