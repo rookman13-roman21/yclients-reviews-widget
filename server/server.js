@@ -857,6 +857,11 @@ app.get('/site-health/report', async (req, res) => {
     log: siteHealthLogPath,
     version: SITE_HEALTH_MONITOR_VERSION,
     checks: SITE_HEALTH_CHECK_URLS,
+    service_checks: SITE_HEALTH_SERVICE_CHECK_URLS,
+    check_intervals: {
+      core: SITE_HEALTH_CHECK_INTERVAL,
+      service: SITE_HEALTH_SERVICE_CHECK_INTERVAL
+    },
     summary: buildSiteHealthSummary(events),
     events
   });
