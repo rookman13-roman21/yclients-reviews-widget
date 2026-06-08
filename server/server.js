@@ -16,6 +16,13 @@ const KVStore = require('./kv-store');
 const PORT = process.env.PORT || 3000;
 const YCLIENTS_API_BASE = 'https://api.yclients.com';
 const DEFAULT_TTL = 300;
+const REVIEWS_SNAPSHOT_KEY = 'reviews:snapshot:v1';
+const REVIEWS_SNAPSHOT_SCHEMA = 2;
+const REVIEWS_SNAPSHOT_TTL_MS = 24 * 60 * 60 * 1000;
+const REVIEWS_SNAPSHOT_PAGE_SIZE = 200;
+const REVIEWS_SNAPSHOT_MAX_PAGES = 50;
+const REVIEWS_PUBLIC_CACHE_TTL = 300;
+
 
 // Env vars (set via .env or system environment)
 const ADMIN_KEY = process.env.ADMIN_KEY || '';
@@ -81,6 +88,7 @@ app.use((req, res, next) => {
 
 let __staffCache = { ts: 0, map: {} };
 let __nameOvCache = { ts: 0, map: {} };
+let __reviewsSnapshotRefreshPromise = null;
 
 // Simple response cache (replaces caches.default)
 const responseCache = new Map();
@@ -221,10 +229,212 @@ function yclientsFetch(url, opts = {}) {
     .finally(() => clearTimeout(timeout));
 }
 
+
+function parseYclientsCommentsPayload(parsed) {
+  if (parsed && Array.isArray(parsed.data)) return parsed.data;
+  if (Array.isArray(parsed)) return parsed;
+  if (parsed && Array.isArray(parsed.comments)) return parsed.comments;
+  return [];
+}
+
+function normalizeReviewComment(d, staffMap = {}, nameOverrides = {}) {
+  const mid = d && d.master_id != null ? String(d.master_id) : null;
+  if (!mid) return null;
+
+  const text = String((d && d.text) || '').trim();
+  const wordCount = text ? text.split(/\s+/).filter(w => w.length > 0).length : 0;
+  if (wordCount < 4) return null;
+
+  let masterName = ID_OVERRIDES[mid] || staffMap[mid] || STAFF_MAP[Number(mid)] || STAFF_MAP[mid] || (d && d.master_name) || null;
+  if (!masterName && d && d.master_name && nameOverrides[d.master_name]) masterName = nameOverrides[d.master_name];
+
+  let ts = null;
+  try {
+    ts = d && d.date ? Date.parse(d.date) : null;
+    if (!Number.isFinite(ts)) ts = null;
+  } catch (_) {
+    ts = null;
+  }
+
+  const compact = {
+    event: 'api.comments',
+    text,
+    date: (d && d.date) || null,
+    id: (d && d.id) || null,
+    rating: (d && typeof d.rating !== 'undefined') ? d.rating : 5,
+    author_name: (d && d.user_name) || null,
+    author_surname: null,
+    master_id: mid,
+    master_name: masterName || null
+  };
+
+  return {
+    id: String((d && d.id) || ''),
+    ts,
+    compact,
+    body: {
+      event: 'api.comments',
+      data: {
+        id: (d && d.id) || null,
+        type: (d && d.type) || null,
+        master_id: mid,
+        text,
+        date: (d && d.date) || null,
+        rating: (d && typeof d.rating !== 'undefined') ? d.rating : 5,
+        user_name: (d && d.user_name) || '',
+        user_avatar: (d && d.user_avatar) || '',
+        master_name: masterName || (d && d.master_name) || null,
+        staff: {
+          id: mid,
+          name: masterName || (d && d.master_name) || (((d && d.staff) || {}).name) || null
+        }
+      }
+    }
+  };
+}
+
+function filterSnapshotReviews(snapshot, { staffParam = '', ratingMin = 0, page = 1, count = 20 } = {}) {
+  const staffSet = new Set(String(staffParam || '').split(',').map(s => s.trim()).filter(Boolean));
+  const minRating = Math.max(0, Number(ratingMin) || 0);
+  const pageNum = Math.max(1, Number(page) || 1);
+  const limit = Math.max(1, Math.min(100, Number(count) || 20));
+
+  let items = Array.isArray(snapshot && snapshot.items) ? snapshot.items : [];
+  if (staffSet.size) {
+    items = items.filter(it => {
+      const mid = it && it.compact ? it.compact.master_id : null;
+      return mid != null && staffSet.has(String(mid));
+    });
+  }
+  if (minRating > 0) {
+    items = items.filter(it => Number(it && it.compact ? it.compact.rating : 0) >= minRating);
+  }
+
+  const total = items.length;
+  const start = (pageNum - 1) * limit;
+  return {
+    items: items.slice(start, start + limit),
+    total,
+    page: pageNum,
+    limit,
+    snapshot_ts: snapshot && snapshot.ts ? snapshot.ts : null,
+    snapshot_age_ms: snapshot && snapshot.ts ? Math.max(0, Date.now() - Number(snapshot.ts)) : null
+  };
+}
+
+async function loadReviewsSnapshot() {
+  const cached = cacheGet(REVIEWS_SNAPSHOT_KEY);
+  if (cached && Array.isArray(cached.items)) return cached;
+
+  const raw = await KV.get(REVIEWS_SNAPSHOT_KEY);
+  if (!raw) return null;
+
+  try {
+    const parsed = JSON.parse(raw);
+    if (!parsed || !Array.isArray(parsed.items) || parsed.schema_version !== REVIEWS_SNAPSHOT_SCHEMA) return null;
+    cachePut(REVIEWS_SNAPSHOT_KEY, parsed, REVIEWS_PUBLIC_CACHE_TTL);
+    return parsed;
+  } catch (_) {
+    return null;
+  }
+}
+
+async function saveReviewsSnapshot(snapshot) {
+  await KV.put(REVIEWS_SNAPSHOT_KEY, JSON.stringify(snapshot));
+  cachePut(REVIEWS_SNAPSHOT_KEY, snapshot, REVIEWS_PUBLIC_CACHE_TTL);
+}
+
+async function refreshReviewsSnapshot({ force = false } = {}) {
+  const current = await loadReviewsSnapshot();
+  const age = current && current.ts ? Date.now() - Number(current.ts) : Infinity;
+  const schemaIsCurrent = current && current.schema_version === REVIEWS_SNAPSHOT_SCHEMA;
+  if (!force && current && schemaIsCurrent && Number.isFinite(age) && age < REVIEWS_SNAPSHOT_TTL_MS) {
+    return { snapshot: current, refreshed: false, reason: 'fresh' };
+  }
+
+  if (!YCLIENTS_PARTNER_TOKEN) {
+    if (current) return { snapshot: current, refreshed: false, reason: 'tokens_missing_stale' };
+    throw new Error('YCLIENTS_PARTNER_TOKEN not configured');
+  }
+
+  if (__reviewsSnapshotRefreshPromise) {
+    const snapshot = await __reviewsSnapshotRefreshPromise;
+    return { snapshot, refreshed: false, reason: 'refresh_in_progress' };
+  }
+
+  __reviewsSnapshotRefreshPromise = (async () => {
+    const staffMap = await getStaffMapCached();
+    const nameOverrides = await getNameOverridesCached();
+    const items = [];
+    let page = 1;
+    let pagesLoaded = 0;
+
+    while (pagesLoaded < REVIEWS_SNAPSHOT_MAX_PAGES) {
+      const target = new URL(YCLIENTS_API_BASE + '/api/v1/comments/' + encodeURIComponent(YCLIENTS_COMPANY_ID) + '/');
+      target.searchParams.set('page', String(page));
+      target.searchParams.set('count', String(REVIEWS_SNAPSHOT_PAGE_SIZE));
+
+      const resp = await yclientsFetch(target.toString(), { timeout: 20000 });
+      if (!resp.ok) {
+        const txt = await resp.text().catch(() => '');
+        throw new Error('YClients comments status ' + resp.status + ': ' + txt.slice(0, 200));
+      }
+
+      let parsed = null;
+      try { parsed = JSON.parse(await resp.text()); } catch (e) { throw new Error('YClients comments invalid JSON'); }
+
+      const dataArr = parseYclientsCommentsPayload(parsed);
+      if (!dataArr.length) break;
+
+      for (const d of dataArr) {
+        const normalized = normalizeReviewComment(d, staffMap, nameOverrides);
+        if (normalized) items.push(normalized);
+      }
+
+      pagesLoaded++;
+      if (dataArr.length < REVIEWS_SNAPSHOT_PAGE_SIZE) break;
+      page++;
+    }
+
+    items.sort((a, b) => Number(b.ts || 0) - Number(a.ts || 0));
+
+    const snapshot = {
+      schema_version: REVIEWS_SNAPSHOT_SCHEMA,
+      items,
+      ts: Date.now(),
+      count: items.length,
+      pages_loaded: pagesLoaded,
+      source: 'yclients-comments-daily'
+    };
+    await saveReviewsSnapshot(snapshot);
+    await KV.put('reviews:snapshot:last_refresh', String(snapshot.ts));
+    console.log('[reviews] Snapshot refreshed: ' + items.length + ' reviews, pages=' + pagesLoaded);
+    return snapshot;
+  })();
+
+  try {
+    const snapshot = await __reviewsSnapshotRefreshPromise;
+    return { snapshot, refreshed: true, reason: 'updated' };
+  } finally {
+    __reviewsSnapshotRefreshPromise = null;
+  }
+}
+
 // ─── Routes ──────────────────────────────────────────────────────────────────
 
 // Health
 app.get('/health', (req, res) => res.send('ok'));
+
+// Hosted widgets for Tilda. Tilda keeps a tiny stable embed; widget code updates here.
+app.use('/widgets', express.static(path.join(__dirname, 'public', 'widgets'), {
+  maxAge: '5m',
+  setHeaders(res, filePath) {
+    if (filePath.endsWith('.js')) {
+      res.setHeader('Content-Type', 'application/javascript; charset=utf-8');
+      res.setHeader('Cache-Control', 'public, max-age=300, stale-while-revalidate=3600');
+    }
+  }
+}));
 
 // ─── GET /reviews ───────────────────────────────────────────────────────────
 
@@ -235,75 +445,62 @@ app.get('/reviews', async (req, res) => {
 
     const companyId = req.query.company_id || YCLIENTS_COMPANY_ID;
     if (!companyId) return res.status(400).json({ success: false, message: 'company_id is required' });
+    if (String(companyId) !== String(YCLIENTS_COMPANY_ID)) {
+      return res.status(400).json({ success: false, message: 'unsupported company_id' });
+    }
 
     const staffParam = req.query.staff_id || req.query.staff_ids || '';
-    const page = req.query.page || '1';
-    const count = req.query.count || '20';
-    const ttl = Number(req.query.ttl || DEFAULT_TTL);
+    const page = Math.max(1, Number(req.query.page || 1) || 1);
+    const count = Math.max(1, Math.min(100, Number(req.query.count || 20) || 20));
+    const ttl = Number(req.query.ttl || REVIEWS_PUBLIC_CACHE_TTL);
+    const ratingMin = Number(req.query.rating_min || 0) || 0;
+    const forceRefresh = req.query.refresh === '1' && checkAdmin(req);
+    const fullLoadAllowed = req.query.full === '1' || req.query.allow_full === '1';
 
-    if (!YCLIENTS_PARTNER_TOKEN) return res.status(500).json({ success: false, message: 'YCLIENTS_PARTNER_TOKEN not configured' });
-
-    // Check cache
-    const cacheKey = `reviews:${companyId}:s:${staffParam || 'all'}:p:${page}:c:${count}`;
-    const cached = cacheGet(cacheKey);
-    if (cached) {
-      res.set({ 'X-Cache': 'HIT', 'Cache-Control': `public, max-age=${ttl}` });
-      return res.json(cached);
+    const cacheKey = 'reviews:snapshot-route:' + companyId + ':s:' + (staffParam || 'all') + ':r:' + ratingMin + ':p:' + page + ':c:' + count + ':full:' + (fullLoadAllowed ? '1' : '0');
+    if (!forceRefresh) {
+      const cached = cacheGet(cacheKey);
+      if (cached) {
+        res.set({ 'X-Cache': 'HIT', 'X-Reviews-Source': 'snapshot', 'Cache-Control': 'public, max-age=' + ttl });
+        return res.json(cached);
+      }
     }
 
-    const target = new URL(`${YCLIENTS_API_BASE}/api/v1/comments/${encodeURIComponent(companyId)}/`);
-    target.searchParams.set('page', page);
-    target.searchParams.set('count', count);
-    if (staffParam) {
-      const list = staffParam.split(',').map(s => s.trim()).filter(Boolean);
-      if (list.length === 1) target.searchParams.set('staff_id', list[0]);
-      else list.forEach(id => target.searchParams.append('staff_id', id));
-    }
-
-    const yResp = await yclientsFetch(target.toString());
-    const upstreamText = await yResp.text();
-
-    if (yResp.status >= 200 && yResp.status < 300) {
-      let parsed = null;
-      try { parsed = JSON.parse(upstreamText); } catch (_) {}
-
-      let dataArr = [];
-      let meta = {};
-      if (parsed && Array.isArray(parsed.data)) { dataArr = parsed.data; meta = parsed.meta || {}; }
-      else if (Array.isArray(parsed)) dataArr = parsed;
-      else if (parsed && Array.isArray(parsed.comments)) dataArr = parsed.comments;
-
-      const totalGuess = Number((meta.total || meta.count || meta.items_total) || (parsed && (parsed.total || parsed.count)) || 0) || dataArr.length;
-
-      const items = dataArr.map(d => {
-        const compact = {
-          event: 'api.comments',
-          text: (d.text || '').trim(),
-          date: d.date || null,
-          id: d.id || null,
-          rating: (typeof d.rating !== 'undefined') ? d.rating : null,
-          author_name: d.user_name || null,
-          author_surname: null,
-          master_id: (typeof d.master_id !== 'undefined') ? d.master_id : null,
-          master_name: (typeof d.master_id !== 'undefined' && d.master_id != null) ? (STAFF_MAP[d.master_id] || null) : null
-        };
-        let ts = null;
-        try { ts = compact.date ? Date.parse(compact.date) : null; if (!Number.isFinite(ts)) ts = null; } catch (_) { ts = null; }
-        return { id: String(d.id || ''), ts, compact, body: { event: 'api.comments', data: d } };
-      });
-
-      const itemsWithMaster = items.filter(it => {
-        const mid = it && it.compact ? it.compact.master_id : null;
-        return mid !== null && typeof mid !== 'undefined' && String(mid).trim() !== '';
-      });
-
-      const outData = { items: itemsWithMaster, total: totalGuess, page: Number(page), limit: Number(count) };
+    if (!fullLoadAllowed && page > 1) {
+      const outData = { items: [], total: 0, page, limit: count, limited: true };
       cachePut(cacheKey, outData, ttl);
-      res.set({ 'X-Cache': 'MISS', 'Cache-Control': `public, max-age=${ttl}` });
+      res.set({
+        'X-Cache': 'LIMITED',
+        'X-Reviews-Source': 'snapshot',
+        'X-Reviews-Limited': '1',
+        'Cache-Control': 'public, max-age=' + ttl
+      });
       return res.json(outData);
     }
 
-    res.status(yResp.status).send(upstreamText);
+    let snapshot = await loadReviewsSnapshot();
+    const isStale = !snapshot || !snapshot.ts || (Date.now() - Number(snapshot.ts)) > REVIEWS_SNAPSHOT_TTL_MS;
+
+    if (forceRefresh || !snapshot) {
+      const refreshed = await refreshReviewsSnapshot({ force: forceRefresh || !snapshot });
+      snapshot = refreshed.snapshot;
+    } else if (isStale) {
+      refreshReviewsSnapshot().catch(e => console.error('[reviews] Background snapshot refresh failed:', e.message));
+    }
+
+    if (!snapshot || !Array.isArray(snapshot.items)) {
+      return res.status(503).json({ error: 'reviews_snapshot_unavailable' });
+    }
+
+    const outData = filterSnapshotReviews(snapshot, { staffParam, ratingMin, page, count });
+    cachePut(cacheKey, outData, ttl);
+    res.set({
+      'X-Cache': forceRefresh ? 'REFRESH' : 'MISS',
+      'X-Reviews-Source': 'snapshot',
+      'X-Reviews-Snapshot-Age': String(outData.snapshot_age_ms || 0),
+      'Cache-Control': 'public, max-age=' + ttl
+    });
+    return res.json(outData);
   } catch (e) {
     res.status(500).json({ error: 'reviews_failed', detail: e.message });
   }
@@ -313,77 +510,33 @@ app.get('/reviews', async (req, res) => {
 
 app.get('/reviews-bundle', async (req, res) => {
   try {
-    const BUNDLE_TTL = 21600; // 6 hours
+    if (!checkOrigin(req)) return res.status(403).json({ error: 'forbidden' });
+    if (!checkReadKey(req)) return res.status(401).json({ error: 'unauthorized' });
 
-    const cacheKey = 'reviews-bundle-v1';
-    const cached = cacheGet(cacheKey);
-    if (cached) {
-      res.set({ 'X-Cache': 'HIT', 'Cache-Control': `public, max-age=${BUNDLE_TTL}` });
-      return res.json(cached);
-    }
-
-    if (!YCLIENTS_PARTNER_TOKEN) return res.status(500).json({ error: 'not configured' });
-
-    const staffMap = await getStaffMapCached();
-    const nameOverrides = await getNameOverridesCached();
-
-    const PAGE_SIZE = 200;
-    let allReviews = [];
-    let page = 1;
-    let guard = 0;
-
-    while (guard < 50) {
-      const target = new URL(`${YCLIENTS_API_BASE}/api/v1/comments/${encodeURIComponent(YCLIENTS_COMPANY_ID)}/`);
-      target.searchParams.set('page', String(page));
-      target.searchParams.set('count', String(PAGE_SIZE));
-
-      const resp = await yclientsFetch(target.toString(), { timeout: 15000 });
-      if (!resp.ok) break;
-
-      let parsed;
-      try { parsed = JSON.parse(await resp.text()); } catch (_) { break; }
-
-      let dataArr = [];
-      if (parsed && Array.isArray(parsed.data)) dataArr = parsed.data;
-      else if (Array.isArray(parsed)) dataArr = parsed;
-      else if (parsed && Array.isArray(parsed.comments)) dataArr = parsed.comments;
-      if (!dataArr.length) break;
-
-      for (const d of dataArr) {
-        const mid = d.master_id != null ? String(d.master_id) : null;
-        if (!mid) continue;
-
-        const text = (d.text || '').trim();
-        const words = text.split(/\s+/).filter(w => w.length > 0);
-        if (words.length < 4) continue;
-
-        let mname = null;
-        if (mid) {
-          mname = ID_OVERRIDES[mid] || staffMap[mid] || STAFF_MAP[Number(mid)] || STAFF_MAP[mid] || d.master_name || null;
-        }
-        if (!mname && d.master_name && nameOverrides[d.master_name]) {
-          mname = nameOverrides[d.master_name];
-        }
-
-        allReviews.push({
-          id: d.id || null,
-          t: text,
-          d: d.date || null,
-          r: (typeof d.rating !== 'undefined') ? d.rating : 5,
-          a: d.user_name || '',
-          m: mid,
-          mn: mname || ''
-        });
-      }
-
-      if (dataArr.length < PAGE_SIZE) break;
-      page++;
-      guard++;
-    }
-
-    const outData = { reviews: allReviews, ts: Date.now(), count: allReviews.length };
-    cachePut(cacheKey, outData, BUNDLE_TTL);
-    res.set({ 'X-Cache': 'MISS', 'X-Reviews-Count': String(allReviews.length), 'Cache-Control': `public, max-age=${BUNDLE_TTL}` });
+    const forceRefresh = req.query.refresh === '1' && checkAdmin(req);
+    const refreshed = await refreshReviewsSnapshot({ force: forceRefresh });
+    const snapshot = refreshed.snapshot;
+    const outData = {
+      reviews: (snapshot.items || []).map(it => ({
+        id: it.id || null,
+        t: it.compact ? it.compact.text : '',
+        d: it.compact ? it.compact.date : null,
+        r: it.compact ? it.compact.rating : 5,
+        a: it.compact ? it.compact.author_name : '',
+        m: it.compact ? it.compact.master_id : null,
+        mn: it.compact ? it.compact.master_name : ''
+      })),
+      ts: snapshot.ts,
+      count: snapshot.count || (snapshot.items || []).length,
+      refreshed: refreshed.refreshed,
+      source: 'snapshot'
+    };
+    res.set({
+      'X-Cache': refreshed.refreshed ? 'REFRESH' : 'HIT',
+      'X-Reviews-Source': 'snapshot',
+      'X-Reviews-Count': String(outData.count),
+      'Cache-Control': 'public, max-age=' + REVIEWS_PUBLIC_CACHE_TTL
+    });
     return res.json(outData);
   } catch (e) {
     res.status(500).json({ error: 'bundle_failed', detail: e.message });
@@ -1036,6 +1189,14 @@ async function cronRefreshStaff() {
   }
 }
 
+async function cronRefreshReviewsSnapshot() {
+  try {
+    await refreshReviewsSnapshot();
+  } catch (e) {
+    console.error('[cron] Reviews snapshot refresh error:', e.message);
+  }
+}
+
 async function cronCleanShort() {
   try {
     const SHORT_MIN_WORDS = 4;
@@ -1084,9 +1245,22 @@ if (!DISABLE_CRON) {
         await KV.put('staff:last_refresh', String(now));
       }
     } catch (_) {}
+    await cronRefreshReviewsSnapshot();
     await cronCleanShort();
   });
-  console.log('[cron] Scheduled tasks enabled (every 6 hours)');
+
+  // Daily forced refresh at 04:20 MSK. Visitors always read the snapshot, not YClients directly.
+  cron.schedule('20 4 * * *', async () => {
+    console.log('[cron] Refreshing reviews snapshot...');
+    try {
+      await refreshReviewsSnapshot({ force: true });
+    } catch (e) {
+      console.error('[cron] Reviews daily snapshot refresh error:', e.message);
+    }
+  });
+
+  refreshReviewsSnapshot().catch(e => console.error('[startup] Reviews snapshot warmup failed:', e.message));
+  console.log('[cron] Scheduled tasks enabled (staff every 6 hours, reviews daily)');
 }
 
 // ─── Start server ───────────────────────────────────────────────────────────

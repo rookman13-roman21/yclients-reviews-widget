@@ -1,13 +1,14 @@
 <!--
   reviews-widget.html — Виджет отзывов МШБ (baristaschool.ru)
   ─────────────────────────────────────────────────────────────
-  Назначение : вставляется как HTML-блок в Tilda на страницу отзывов.
-               НЕ хранится на сервере, деплой = замена кода в Tilda.
+  Назначение : исходник виджета отзывов.
+               Основной способ использования — собрать server/public/widgets/reviews.js
+               и вставить в Tilda короткий код из tilda-embed.html.
 
   Что делает : загружает отзывы с YClients через прокси-сервер
                (api.barista-school.ru → Node.js на 5.35.93.225).
-               Двухэтапная загрузка: первые 20 отзывов быстро,
-               затем фоновая догрузка всех.
+               Первые 20 отзывов грузятся быстро, следующие 20 догружаются
+               только по действию пользователя.
                Фильтр по тренеру, слайдер, hover-попапы тренеров.
 
   Прокси     : https://api.barista-school.ru  (PM2: barista-reviews)
@@ -323,6 +324,7 @@
     // Этап 2: фоновая полная догрузка всех отзывов
     const STAGE_ONE_COUNT = 20; // первая порция (~18KB) — быстро даже на медленном соединении
     const FULL_LOAD_PAGE_SIZE = 50; // размер страницы при полной загрузке (~50KB, compromise)
+    const AUTO_FULL_LOAD = false; // не забиваем API фоновыми запросами на все страницы отзывов
     // (legacy fallback constants, если понадобится переключить режим)
     const LIMIT = 7; // максимальная серверная страница (исторически)
     const INITIAL_LOAD = 10;
@@ -334,7 +336,7 @@
     // Структура: { initialLoaded, fullLoaded, initialItems[], fullItems[], loadingFull }
     const reviewsCache = {};
     const TRAINERS_LOCAL_KEY = 'yc_trainers_v1';
-    const REVIEWS_CACHE_KEY = 'yc_reviews_v2'; // localStorage кэш отзывов
+    const REVIEWS_CACHE_KEY = 'yc_reviews_v3_snapshot'; // localStorage кэш отзывов
     const REVIEWS_CACHE_TTL = 30 * 60 * 1000; // 30 минут
     // === Видимость тренеров ===
     // 1 = показывать, 0 = скрыть. Если id отсутствует — показывается по умолчанию.
@@ -353,7 +355,7 @@
       '3323198': 0, // Никита Бобачев
       '3269178': 1, // Роман Лунгу
       '3915755': 1, // Сабрина
-      '1322544': 1, // Суслин Роман
+      '1322544': 0, // Суслин Роман
       '4103142': 0, // Тренер 4103142 (имя пока неизвестно)
       '4837950': 1, // Аркадий Скалин
     };
@@ -496,8 +498,7 @@
       updateRenderedMasterNames(trainerMap);
     // Применить скрытие по TRAINER_VISIBILITY
     applyTrainerVisibility();
-        // После загрузки списка тренеров запускаем пред-загрузку отзывов (этап 1) для всех видимых
-        try { preloadStageOneForAll(finalList); } catch(e){ console.warn('preloadStageOneForAll failed', e); }
+        // Не предзагружаем отзывы всех тренеров: это забивает общий API-домен и мешает расписаниям.
       } catch (e) {
         console.warn('Failed to load trainers:', e && e.message ? e.message : e);
         // keep initial fallback (already set) and make control usable
@@ -636,8 +637,8 @@
       } catch(e){ return items; }
     }
 
-    async function fetchPageFromServer(count, page, trainerId = '', rating = 0) {
-      console.log('Fetching reviews:', { count, page, trainerId, rating, API_KEY: API_KEY ? 'present' : 'missing' });
+    async function fetchPageFromServer(count, page, trainerId = '', rating = 0, options = {}) {
+      console.log('Fetching reviews:', { count, page, trainerId, rating, full: !!options.full, API_KEY: API_KEY ? 'present' : 'missing' });
       const headers = { 'Accept': 'application/json' };
       if (API_KEY) headers['X-API-Key'] = API_KEY;
       console.log('Headers:', headers);
@@ -645,9 +646,10 @@
       // prefer /reviews
       const staffQuery = trainerId ? `&staff_id=${encodeURIComponent(trainerId)}` : (currentTrainer ? `&staff_id=${encodeURIComponent(currentTrainer)}` : '');
       const ratingQuery = rating > 0 ? `&rating_min=${rating}` : '';
+      const fullQuery = options && options.full ? '&full=1' : '';
       // Одна попытка, без fallback на /events (он ~28 сек и бесполезен на медленном ISP)
       try {
-        const resp = await fetchWithTimeout(`${base}/reviews?company_id=453962&count=${count}&page=${page}${staffQuery}${ratingQuery}`, { headers });
+        const resp = await fetchWithTimeout(`${base}/reviews?company_id=453962&count=${count}&page=${page}${staffQuery}${ratingQuery}${fullQuery}`, { headers });
         if (!resp.ok) throw new Error(`reviews status ${resp.status}`);
         const json = await resp.json();
         console.log('Fetched reviews:', json.items ? json.items.length : 0, 'page', page);
@@ -668,10 +670,17 @@
       try {
         const body = await fetchPageFromServer(STAGE_ONE_COUNT, 1, trainerId, rating);
         const { items = [] } = body || {};
+        const total = Number(body && body.total);
         entry.initialItems = items;
         entry.initialLoaded = true;
+        entry.nextPage = 2;
+        entry.totalAvailable = Number.isFinite(total) && total >= 0 ? total : null;
+        entry.exhausted = !!(body && body.limited) || items.length < STAGE_ONE_COUNT || (entry.totalAvailable !== null && items.length >= entry.totalAvailable);
+        totalAvailable = entry.totalAvailable;
+        exhausted = entry.exhausted;
+        currentPage = 1;
         // Если меньше чем STAGE_ONE_COUNT вернулось, считаем что полный набор = то что есть
-        if (items.length < STAGE_ONE_COUNT) {
+        if (entry.exhausted) {
           entry.fullItems = items.slice();
           entry.fullLoaded = true;
         }
@@ -779,12 +788,21 @@
         const cached = getReviewsFromCache(currentTrainer || '', currentRating);
         if (cached && cached.length > 0) {
           itemsBuffer = cached.slice();
+          if (!reviewsCache[key]) reviewsCache[key] = { initialLoaded:false, fullLoaded:false, initialItems:[], fullItems:[], loadingFull:false };
+          reviewsCache[key].initialItems = cached.slice();
+          reviewsCache[key].initialLoaded = true;
+          reviewsCache[key].nextPage = Math.floor(cached.length / STAGE_ONE_COUNT) + 1;
+          reviewsCache[key].exhausted = false;
+          totalAvailable = reviewsCache[key].totalAvailable || null;
+          exhausted = false;
           renderBuffer(true);
-          ensureFull(currentTrainer || '', currentRating).catch(function(){});
+          if (AUTO_FULL_LOAD) {
+            ensureFull(currentTrainer || '', currentRating).catch(function(){});
+          }
           return;
         }
         // Сетевая загрузка
-        if (currentRating > 0) {
+        if (AUTO_FULL_LOAD && currentRating > 0) {
           const items = await ensureFull(currentTrainer || '', currentRating);
           itemsBuffer = items.slice();
           renderBuffer(true);
@@ -794,12 +812,16 @@
             itemsBuffer = items.slice();
             renderBuffer(true);
           }
-          ensureFull(currentTrainer || '', currentRating).catch(function(e) {
-            console.warn('ensureFull background failed:', e && e.message);
-            if (items.length === 0 && itemsBuffer.length === 0) {
-              listEl.innerHTML = '<div class="yc-empty">Не удалось загрузить отзывы. <span style="text-decoration:underline;cursor:pointer" onclick="window.__yclients_widget.refresh()">Попробовать снова</span></div>';
-            }
-          });
+          if (AUTO_FULL_LOAD) {
+            ensureFull(currentTrainer || '', currentRating).catch(function(e) {
+              console.warn('ensureFull background failed:', e && e.message);
+              if (items.length === 0 && itemsBuffer.length === 0) {
+                listEl.innerHTML = '<div class="yc-empty">Не удалось загрузить отзывы. <span style="text-decoration:underline;cursor:pointer" onclick="window.__yclients_widget.refresh()">Попробовать снова</span></div>';
+              }
+            });
+          } else if (items.length === 0 && itemsBuffer.length === 0) {
+            listEl.innerHTML = '<div class="yc-empty">Не удалось загрузить отзывы. <span style="text-decoration:underline;cursor:pointer" onclick="window.__yclients_widget.refresh()">Попробовать снова</span></div>';
+          }
         }
       } catch(e){
         console.log('loadInitial failed:', e);
@@ -811,7 +833,66 @@
       }
     }
 
-    async function loadMore(){ /* full-load mode: not used */ }
+    function getCurrentReviewsEntry() {
+      const key = String(currentTrainer || '') + ':' + String(currentRating);
+      if (!reviewsCache[key]) reviewsCache[key] = { initialLoaded:false, fullLoaded:false, initialItems:[], fullItems:[], loadingFull:false, nextPage:1, totalAvailable:null, exhausted:false };
+      return reviewsCache[key];
+    }
+
+    function mergeReviewItems(baseItems, newItems) {
+      const out = [];
+      const seen = new Set();
+      (baseItems || []).concat(newItems || []).forEach(function(item) {
+        const id = item && (item.id || (item.body && item.body.id) || (item.compact && item.compact.id));
+        const key = id ? String(id) : getReviewKey(item || {});
+        if (!key || seen.has(key)) return;
+        seen.add(key);
+        out.push(item);
+      });
+      return out;
+    }
+
+    function canLoadMoreReviews() {
+      if (fetching || exhausted) return false;
+      if (totalAvailable === null || typeof totalAvailable === 'undefined') return itemsBuffer.length >= STAGE_ONE_COUNT;
+      return itemsBuffer.length < Number(totalAvailable || 0);
+    }
+
+    async function loadMore(){
+      if (!canLoadMoreReviews()) return [];
+      const entry = getCurrentReviewsEntry();
+      const page = Math.max(2, Number(entry.nextPage || 2));
+      fetching = true;
+      entry.loadingFull = true;
+      try { updateVisibleCounter(); } catch(_) {}
+      try {
+        const body = await fetchPageFromServer(STAGE_ONE_COUNT, page, currentTrainer || '', currentRating, { full: true });
+        const items = body && Array.isArray(body.items) ? body.items : [];
+        const total = Number(body && body.total);
+        if (Number.isFinite(total) && total >= 0) {
+          entry.totalAvailable = total;
+          totalAvailable = total;
+        }
+        const merged = mergeReviewItems(itemsBuffer.length ? itemsBuffer : entry.initialItems, items);
+        entry.initialItems = merged.slice();
+        entry.fullItems = merged.slice();
+        entry.initialLoaded = true;
+        entry.nextPage = page + 1;
+        entry.exhausted = !!(body && body.limited) || !items.length || items.length < STAGE_ONE_COUNT || (entry.totalAvailable !== null && merged.length >= entry.totalAvailable);
+        exhausted = entry.exhausted;
+        itemsBuffer = merged.slice();
+        saveReviewsToCache(currentTrainer || '', currentRating, itemsBuffer);
+        renderBuffer(false);
+        return items;
+      } catch(e) {
+        console.warn('loadMore failed', e && e.message ? e.message : e);
+        return [];
+      } finally {
+        fetching = false;
+        entry.loadingFull = false;
+        try { updateVisibleCounter(); } catch(_) {}
+      }
+    }
 
     // Render the accumulated buffer into the slider
     function renderBuffer(forceRerender = false){
@@ -1164,12 +1245,15 @@
         // Проверка статуса загрузки полного набора: если идёт фоновая догрузка, показываем спиннер
         let spinnerHtml = '';
         try {
-          const anyLoading = Object.values(reviewsCache).some(entry => entry.loadingFull && !entry.fullLoaded);
+          const anyLoading = fetching || Object.values(reviewsCache).some(entry => entry.loadingFull && !entry.fullLoaded);
           if (anyLoading) spinnerHtml = '<span class="yc-inline-spinner" aria-label="Загрузка"></span>';
         } catch(_){}
         if (countEl) {
           const textEl = countEl.querySelector('.yc-count-text');
-          if (textEl) textEl.innerHTML = `Просмотрено: ${maxIndexSeen} из ${total} ${spinnerHtml}`;
+          if (textEl) {
+            const moreHtml = canLoadMoreReviews() ? '<span style="color:#7a9d6f;font-weight:700"> · ещё есть</span>' : '';
+            textEl.innerHTML = `Просмотрено: ${maxIndexSeen} из ${total}${moreHtml} ${spinnerHtml}`;
+          }
         }
       } catch (e) { /* ignore */ }
     }
@@ -1186,15 +1270,28 @@
         const prevBtn = filterEl.querySelector('.yc-nav-prev');
         const nextBtn = filterEl.querySelector('.yc-nav-next');
         function updateButtonStates() {
-          if (prevBtn) prevBtn.disabled = track.scrollLeft <= 0;
-          if (nextBtn) nextBtn.disabled = track.scrollLeft >= (track.scrollWidth - track.clientWidth);
+          const atStart = track.scrollLeft <= 0;
+          const atEnd = track.scrollLeft >= (track.scrollWidth - track.clientWidth - 4);
+          if (prevBtn) prevBtn.disabled = atStart;
+          if (nextBtn) nextBtn.disabled = atEnd && !canLoadMoreReviews();
         }
-        const scrollByCards = (direction) => {
+        const scrollByCards = async (direction) => {
           const isMobile = window.innerWidth < 640;
           const cardsPerScroll = isMobile ? 1 : 2;
           const cardWidth = isMobile ? 280 : 320; // match .yc-group widths
-    const gap = 10; // match .yc-track gap
-    const scrollAmount = direction * (cardsPerScroll * cardWidth + (cardsPerScroll - 1) * gap);
+          const gap = 10; // match .yc-track gap
+          const scrollAmount = direction * (cardsPerScroll * cardWidth + (cardsPerScroll - 1) * gap);
+          const atEnd = track.scrollLeft >= (track.scrollWidth - track.clientWidth - 4);
+          if (direction > 0 && atEnd && canLoadMoreReviews()) {
+            const beforeWidth = track.scrollWidth;
+            await loadMore();
+            window.setTimeout(function() {
+              const delta = Math.max(scrollAmount, track.scrollWidth - beforeWidth);
+              track.scrollBy({ left: delta, behavior: 'smooth' });
+              updateButtonStates();
+            }, 80);
+            return;
+          }
           track.scrollBy({ left: scrollAmount, behavior: 'smooth' });
         };
         if (prevBtn) prevBtn.addEventListener('click', () => scrollByCards(-1));
@@ -1352,7 +1449,7 @@
           } catch(_) { /* ignore */ }
         }
         // update on relevant events
-    track.addEventListener('scroll', () => { updateVisibleCounter(); collapseIfHidden(); });
+    track.addEventListener('scroll', () => { updateVisibleCounter(); updateButtonStates(); collapseIfHidden(); });
     // Removed broken window scroll sync that caused jumps and referenced undefined savedScrollLeft
     window.addEventListener('resize', () => {
       clearTimeout(_resizeTO);
@@ -1363,7 +1460,8 @@
         // expose for external updates after re-render
         try { window.__yclients_widget._updateCounter = updateVisibleCounter; } catch(_){}
 
-        // Автодогрузка отключена (все отзывы подгружаются сразу)
+        updateButtonStates();
+        // Автодогрузка отключена: следующие 20 отзывов грузятся только по правой стрелке в конце списка.
       } catch (e) { console.warn('initSlider failed', e); }
     }
 
