@@ -33,10 +33,20 @@
     if (!root.id) root.id = 'mbs-reviews-widget-' + Math.random().toString(36).slice(2);
 
     var bundle = document.createElement('script');
-    bundle.src = 'https://api.barista-school.ru/widgets/reviews.bundle.js?v=20260608-2';
+    bundle.src = 'https://api.barista-school.ru/widgets/reviews.bundle.js?v=20260619-1';
     bundle.async = true;
     bundle.setAttribute('data-target', '#' + root.id);
+    var fallbackTimer = window.setTimeout(function() {
+      if (!root.querySelector('#yc-widget')) {
+        root.removeAttribute('data-mbs-reviews-loader');
+        root.innerHTML = '<div style="padding:20px;color:#888;text-align:center;font-family:Mulish,Arial,sans-serif">Отзывы временно не загрузились. Обновите страницу.</div>';
+      }
+    }, 8000);
+    bundle.onload = function() {
+      window.clearTimeout(fallbackTimer);
+    };
     bundle.onerror = function() {
+      window.clearTimeout(fallbackTimer);
       root.removeAttribute('data-mbs-reviews-loader');
       root.innerHTML = '<div style="padding:20px;color:#888;text-align:center;font-family:Mulish,Arial,sans-serif">Не удалось загрузить отзывы</div>';
     };

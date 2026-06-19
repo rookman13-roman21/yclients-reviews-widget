@@ -29,7 +29,7 @@ Hosted widget JS
 nginx (api.barista-school.ru)
     ↓ proxy_pass port 3000
 Node.js server.js (PM2: barista-reviews)
-    ↓ SQLite snapshot, обновление по cron 1 раз в сутки
+    ↓ SQLite snapshot, обновление по cron примерно раз в час
 YClients API (company 453962)
 ```
 
@@ -59,7 +59,7 @@ YClients API (company 453962)
 
 - `https://forma.tinkoff.ru/static/onlineScript.js` в `<head>`;
 - `https://api.barista-school.ru/widgets/reviews.js`;
-- `https://api.barista-school.ru/static/karta-uchenikov/karta-uchenikov.js`.
+- `https://api.barista-school.ru/static/karta-uchenikov/karta-uchenikov.js` — удалён с главной 2026-06-09.
 
 Виджет отзывов переведён на безопасную схему: Tilda грузит маленький loader `/widgets/reviews.js`, а основной код `/widgets/reviews.bundle.js` подключается асинхронно. Отзывы читаются из серверного snapshot-кэша, а не из yClients напрямую из браузера посетителя.
 
@@ -145,8 +145,7 @@ https://api.barista-school.ru/site-health/report?key=ADMIN_KEY&limit=500
 - `https://baristaschool.ru/excu`;
 - `https://baristaschool.ru/latte_art_battle`;
 - `https://api.barista-school.ru/health`;
-- `https://api.barista-school.ru/widgets/reviews.js`;
-- `https://api.barista-school.ru/static/karta-uchenikov/karta-uchenikov.js`.
+- `https://api.barista-school.ru/widgets/reviews.js`.
 
 По умолчанию раз в 15 минут проверяются service URL:
 
@@ -181,6 +180,8 @@ https://api.barista-school.ru/site-health/report?key=ADMIN_KEY&limit=500
 Список core URL можно переопределить через env `SITE_HEALTH_CHECK_URLS`, интервал cron — через `SITE_HEALTH_CHECK_INTERVAL`.
 Список service URL можно переопределить через env `SITE_HEALTH_SERVICE_CHECK_URLS`, интервал cron — через `SITE_HEALTH_SERVICE_CHECK_INTERVAL`.
 Timeout — через `SITE_HEALTH_CHECK_TIMEOUT_MS`.
+Для сетевых timeout/abort монитор делает одну повторную попытку через `SITE_HEALTH_RETRY_DELAY_MS` мс, по умолчанию 750. Если повторная попытка успешна, событие пишется как `server_check` с `attempts: 2` и `detail: retry_ok`.
+Проверки core и service защищены от наложения: если предыдущий обход ещё идёт, следующий запуск этой группы пропускается.
 
 События серверных проверок получают поле `group`: `core`, `api` или `service`.
 Лог `site-health.jsonl` ротируется при 20 МБ в `site-health.jsonl.1`; старый `.1` заменяется новым, поэтому лог не растёт бесконечно.
@@ -200,14 +201,15 @@ Timeout — через `SITE_HEALTH_CHECK_TIMEOUT_MS`.
 
 ### Аутентификация
 
-- `X-API-Key: <YCLIENTS_READ_KEY>` — для чтения (если задан в .env)
-- `Origin` или `Referer` — должен начинаться с одного из `ALLOWED_ORIGINS`
+- Публичные snapshot-endpoints `/reviews`, `/reviews-bundle` и `/trainers` доступны только при разрешённом `Origin` или `Referer`.
+- Приватные raw endpoints `/events` и `/event/:id` требуют `ADMIN_KEY`.
+- `Origin` или `Referer` должен начинаться с одного из `ALLOWED_ORIGINS`
 - Без заголовка `Origin` — **403 forbidden**
 
 ### Кэш отзывов
 
-- Отзывы собираются сервером в SQLite snapshot и обновляются не чаще 1 раза в сутки.
-- Плановое принудительное обновление: каждый день в `04:20` МСК.
+- Отзывы собираются сервером в SQLite snapshot и по умолчанию считаются свежими 60 минут (`REVIEWS_SNAPSHOT_TTL_MINUTES`).
+- Плановое принудительное обновление: раз в час на 17-й минуте (`REVIEWS_SNAPSHOT_CRON`, cron-формат).
 - При рестарте PM2 snapshot прогревается автоматически, если отсутствует, устарел или имеет старую схему.
 - Обычный публичный `/reviews` не отдаёт `page>1`, чтобы старый Tilda-код не создавал лавину запросов. Для технической полной выдачи использовать `/reviews-bundle` или `/reviews?...&full=1`.
 - В публичный ответ не попадают `user_email`, `user_phone`, `record_id` и другие внутренние поля yClients.
@@ -247,7 +249,6 @@ Timeout — через `SITE_HEALTH_CHECK_TIMEOUT_MS`.
 YCLIENTS_PARTNER_TOKEN=...   # Партнёрский токен YClients
 YCLIENTS_USER_TOKEN=...      # Пользовательский токен YClients
 YCLIENTS_COMPANY_ID=453962   # ID компании МШБ
-YCLIENTS_READ_KEY=           # Пустой = не требует X-API-Key
 ADMIN_KEY=...                # Для /admin/* эндпоинтов
 ALLOWED_ORIGINS=https://baristaschool.ru,...
 PORT=3000
@@ -279,7 +280,7 @@ ssh -i ~/.ssh/id_ed25519 root@5.35.93.225 'pm2 restart barista-reviews'
 
 ```html
 <div id="mbs-reviews-widget" data-mbs-reviews-widget></div>
-<script defer src="https://api.barista-school.ru/widgets/reviews.js"></script>
+<script defer src="https://api.barista-school.ru/widgets/reviews.js?v=20260619-1"></script>
 ```
 
 После этого обычные изменения виджета делаются через `reviews-widget.html` → `node scripts/build-hosted-widget.js` → деплой файлов из `server/public/widgets/` на сервер. Tilda-код менять не нужно.
@@ -303,7 +304,6 @@ ssh -i ~/.ssh/id_ed25519 root@5.35.93.225 'nginx -t && systemctl reload nginx'
 
 ```js
 const WORKER_URL = 'https://api.barista-school.ru'; // URL прокси-сервера
-const API_KEY = 'T2t7a5whm5...';  // X-API-Key (соответствует YCLIENTS_READ_KEY в .env)
 const STAGE_ONE_COUNT = 20;        // Первая быстрая порция отзывов
 const FULL_LOAD_PAGE_SIZE = 50;    // legacy, используется только если включить AUTO_FULL_LOAD
 const AUTO_FULL_LOAD = false;      // не включать на сайте без отдельной причины
@@ -333,7 +333,7 @@ const TRAINER_VISIBILITY = {
   '3915755': 1, // Сабрина Темурова
   '1322544': 0, // Суслин Роман
   '4103142': 0, // (имя неизвестно)
-  '4837950': 0, // Аркадий Скалин
+  '4837950': 1, // Аркадий Скалин
 };
 ```
 
@@ -388,3 +388,4 @@ pm2 restart barista-reviews
 | 2026-04-30 | `/trainers` возвращал пустой список | Добавлен параметр `?include_zero=1` в виджете (KV-база пустая, счётчики = 0, фильтр обрезал всех тренеров) |
 | 2026-05-16 | XSS в `renderItem()` | `authorHtml` обёрнут в `escapeHtml()` (было: `author ? author : ''`) |
 | 2026-05-16 | `console.log` спам на каждый рендер карточки | Удалён отладочный `console.log('Rendering item:', ...)` из `renderItem()` |
+| 2026-06-19 | Новые отзывы не появлялись до суточного cron, а `ещё есть` не запускало догрузку напрямую | Snapshot принудительно обновлён через admin endpoint; подготовлен hourly snapshot cron, `ещё есть` стало кнопкой, правая стрелка догружает заранее, hosted widget обновлён до `20260619-1` |

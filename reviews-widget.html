@@ -16,7 +16,6 @@
 
   Ключевые константы (в начале <script>):
     WORKER_URL          — URL прокси
-    API_KEY             — X-API-Key (= YCLIENTS_READ_KEY в .env сервера)
     TRAINER_VISIBILITY  — какие тренеры видны в фильтре (1/0)
     TRAINER_POPUPS      — якоря попапов тренеров в Tilda (#roman, #nikita…)
     STAFF_FALLBACK      — имена тренеров если /trainers недоступен
@@ -199,6 +198,17 @@
     #yc-pagination { display: none !important; }
     /* show count text under header */
     #yc-count { display: flex; align-items: center; white-space: nowrap; flex: 0 0 auto; color:#555; font-size:13px; font-weight:600; }
+    .yc-more-inline {
+      appearance: none;
+      border: 0;
+      background: transparent;
+      color: #4F883E;
+      cursor: pointer;
+      font: inherit;
+      font-weight: 800;
+      padding: 0;
+    }
+    .yc-more-inline:hover { color: #417033; text-decoration: underline; }
 
     /* Navigation buttons for reviews */
     .yc-nav-buttons button {
@@ -314,7 +324,6 @@
   (function(){
     // === Настройки ===
     const WORKER_URL = 'https://api.barista-school.ru'; // custom domain (was: proxy-worker.rookman13.workers.dev)
-    const API_KEY = 'T2t7a5whm57Wwu70TgSyRm0Wu3p0ueZODRmzZr2jla2Tl459rqFTGv0XMyq6P5eU'; // ключ для доступа
     // Жесткий сдвиг всего блока вправо на desktop (для выравнивания фильтров и карточек)
     const FORCE_LEFT_OFFSET_PX = 0; // 0 чтобы выключить
     // Дополнительный левый коррект (переместить все карточки налево на 10px)
@@ -464,7 +473,6 @@
 
         // Now fetch fresh trainers in background and update when available
         const headers = { 'Accept': 'application/json' };
-        if (API_KEY) headers['X-API-Key'] = API_KEY;
         const base = WORKER_URL.replace(/\/+$/, '');
         // Одна попытка без ретраев (экономим время на медленном ISP)
         const resp = await fetchWithTimeout(`${base}/trainers?include_zero=1`, { headers });
@@ -638,10 +646,8 @@
     }
 
     async function fetchPageFromServer(count, page, trainerId = '', rating = 0, options = {}) {
-      console.log('Fetching reviews:', { count, page, trainerId, rating, full: !!options.full, API_KEY: API_KEY ? 'present' : 'missing' });
+      console.log('Fetching reviews:', { count, page, trainerId, rating, full: !!options.full });
       const headers = { 'Accept': 'application/json' };
-      if (API_KEY) headers['X-API-Key'] = API_KEY;
-      console.log('Headers:', headers);
       const base = WORKER_URL.replace(/\/+$/, '');
       // prefer /reviews
       const staffQuery = trainerId ? `&staff_id=${encodeURIComponent(trainerId)}` : (currentTrainer ? `&staff_id=${encodeURIComponent(currentTrainer)}` : '');
@@ -1251,8 +1257,21 @@
         if (countEl) {
           const textEl = countEl.querySelector('.yc-count-text');
           if (textEl) {
-            const moreHtml = canLoadMoreReviews() ? '<span style="color:#7a9d6f;font-weight:700"> · ещё есть</span>' : '';
+            const moreHtml = canLoadMoreReviews() ? '<button type="button" class="yc-more-inline" title="Загрузить ещё отзывы"> · ещё есть</button>' : '';
             textEl.innerHTML = `Просмотрено: ${maxIndexSeen} из ${total}${moreHtml} ${spinnerHtml}`;
+            const moreBtn = textEl.querySelector('.yc-more-inline');
+            if (moreBtn) {
+              moreBtn.addEventListener('click', function(e) {
+                e.preventDefault();
+                loadMore().then(function() {
+                  if (track) {
+                    window.setTimeout(function() {
+                      track.scrollBy({ left: window.innerWidth < 640 ? 290 : 650, behavior: 'smooth' });
+                    }, 80);
+                  }
+                });
+              }, { once: true });
+            }
           }
         }
       } catch (e) { /* ignore */ }
@@ -1281,8 +1300,10 @@
           const cardWidth = isMobile ? 280 : 320; // match .yc-group widths
           const gap = 10; // match .yc-track gap
           const scrollAmount = direction * (cardsPerScroll * cardWidth + (cardsPerScroll - 1) * gap);
-          const atEnd = track.scrollLeft >= (track.scrollWidth - track.clientWidth - 4);
-          if (direction > 0 && atEnd && canLoadMoreReviews()) {
+          const maxScrollLeft = track.scrollWidth - track.clientWidth - 4;
+          const atEnd = track.scrollLeft >= maxScrollLeft;
+          const willReachEnd = track.scrollLeft + Math.abs(scrollAmount) >= maxScrollLeft;
+          if (direction > 0 && (atEnd || willReachEnd) && canLoadMoreReviews()) {
             const beforeWidth = track.scrollWidth;
             await loadMore();
             window.setTimeout(function() {

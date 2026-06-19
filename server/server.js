@@ -18,7 +18,8 @@ const YCLIENTS_API_BASE = 'https://api.yclients.com';
 const DEFAULT_TTL = 300;
 const REVIEWS_SNAPSHOT_KEY = 'reviews:snapshot:v1';
 const REVIEWS_SNAPSHOT_SCHEMA = 2;
-const REVIEWS_SNAPSHOT_TTL_MS = 24 * 60 * 60 * 1000;
+const REVIEWS_SNAPSHOT_TTL_MS = Math.max(5, Number(process.env.REVIEWS_SNAPSHOT_TTL_MINUTES || 60)) * 60 * 1000;
+const REVIEWS_SNAPSHOT_CRON = process.env.REVIEWS_SNAPSHOT_CRON || '17 * * * *';
 const REVIEWS_SNAPSHOT_PAGE_SIZE = 200;
 const REVIEWS_SNAPSHOT_MAX_PAGES = 50;
 const REVIEWS_PUBLIC_CACHE_TTL = 300;
@@ -27,6 +28,7 @@ const SITE_HEALTH_MONITOR_VERSION = '20260608-2';
 const SITE_HEALTH_CHECK_INTERVAL = process.env.SITE_HEALTH_CHECK_INTERVAL || '*/1 * * * *';
 const SITE_HEALTH_SERVICE_CHECK_INTERVAL = process.env.SITE_HEALTH_SERVICE_CHECK_INTERVAL || '*/15 * * * *';
 const SITE_HEALTH_CHECK_TIMEOUT_MS = Number(process.env.SITE_HEALTH_CHECK_TIMEOUT_MS || 10000);
+const SITE_HEALTH_RETRY_DELAY_MS = Number(process.env.SITE_HEALTH_RETRY_DELAY_MS || 750);
 
 
 // Env vars (set via .env or system environment)
@@ -35,7 +37,6 @@ const YCLIENTS_PARTNER_TOKEN = process.env.YCLIENTS_PARTNER_TOKEN || '';
 const YCLIENTS_USER_TOKEN = process.env.YCLIENTS_USER_TOKEN || '';
 const YCLIENTS_COMPANY_ID = process.env.YCLIENTS_COMPANY_ID || '453962';
 const YCLIENTS_WEBHOOK_SECRET = process.env.YCLIENTS_WEBHOOK_SECRET || '';
-const YCLIENTS_READ_KEY = process.env.YCLIENTS_READ_KEY || '';
 const STAFF_REFRESH_INTERVAL_HOURS = Number(process.env.STAFF_REFRESH_INTERVAL_HOURS || 6);
 const CRON_CLEAN_LIMIT = Math.min(200, Number(process.env.CRON_CLEAN_LIMIT || 50));
 const DISABLE_CRON = process.env.DISABLE_CRON === '1';
@@ -47,8 +48,7 @@ const SITE_HEALTH_CHECK_URLS = (process.env.SITE_HEALTH_CHECK_URLS || [
   'https://baristaschool.ru/excu',
   'https://baristaschool.ru/latte_art_battle',
   'https://api.barista-school.ru/health',
-  'https://api.barista-school.ru/widgets/reviews.js',
-  'https://api.barista-school.ru/static/karta-uchenikov/karta-uchenikov.js'
+  'https://api.barista-school.ru/widgets/reviews.js'
 ].join(',')).split(',').map(s => s.trim()).filter(Boolean);
 const SITE_HEALTH_SERVICE_CHECK_URLS = (process.env.SITE_HEALTH_SERVICE_CHECK_URLS || [
   'https://baristaschool.ru/barista_courses',
@@ -109,7 +109,7 @@ const app = express();
 app.use(cors({
   origin: '*',
   methods: ['GET', 'POST', 'OPTIONS'],
-  allowedHeaders: ['Content-Type', 'Authorization', 'X-YCLIENTS-Signature', 'X-API-Key', 'X-Admin-Key', 'X-Admin-Force', 'X-Force-Update', 'X-Dry-Run']
+  allowedHeaders: ['Content-Type', 'Authorization', 'X-YCLIENTS-Signature', 'X-Admin-Key', 'X-Admin-Force', 'X-Force-Update', 'X-Dry-Run']
 }));
 
 // Parse JSON for POST (but capture raw body for webhook HMAC)
@@ -134,6 +134,10 @@ let __staffCache = { ts: 0, map: {} };
 let __nameOvCache = { ts: 0, map: {} };
 let __reviewsSnapshotRefreshPromise = null;
 const __siteHealthRate = new Map();
+const __siteHealthRunning = {
+  core: false,
+  service: false
+};
 
 // Simple response cache (replaces caches.default)
 const responseCache = new Map();
@@ -255,10 +259,8 @@ function checkOrigin(req) {
   return ALLOWED_ORIGINS.some(o => origin.startsWith(o));
 }
 
-function checkReadKey(req) {
-  if (!YCLIENTS_READ_KEY) return true;
-  const key = req.headers['x-api-key'] || '';
-  return String(key) === String(YCLIENTS_READ_KEY);
+function checkPrivateRead(req) {
+  return checkAdmin(req);
 }
 
 function checkSiteHealthOrigin(req) {
@@ -872,7 +874,6 @@ app.get('/site-health/report', async (req, res) => {
 app.get('/reviews', async (req, res) => {
   try {
     if (!checkOrigin(req)) return res.status(403).json({ error: 'forbidden' });
-    if (!checkReadKey(req)) return res.status(401).json({ error: 'unauthorized' });
 
     const companyId = req.query.company_id || YCLIENTS_COMPANY_ID;
     if (!companyId) return res.status(400).json({ success: false, message: 'company_id is required' });
@@ -942,7 +943,6 @@ app.get('/reviews', async (req, res) => {
 app.get('/reviews-bundle', async (req, res) => {
   try {
     if (!checkOrigin(req)) return res.status(403).json({ error: 'forbidden' });
-    if (!checkReadKey(req)) return res.status(401).json({ error: 'unauthorized' });
 
     const forceRefresh = req.query.refresh === '1' && checkAdmin(req);
     const refreshed = await refreshReviewsSnapshot({ force: forceRefresh });
@@ -1032,7 +1032,7 @@ app.post('/webhook', async (req, res) => {
 app.get('/events', async (req, res) => {
   try {
     if (!checkOrigin(req)) return res.status(403).json({ error: 'forbidden' });
-    if (!checkReadKey(req)) return res.status(401).json({ error: 'unauthorized' });
+    if (!checkPrivateRead(req)) return res.status(401).json({ error: 'unauthorized' });
 
     const limit = Math.min(100, Number(req.query.limit || 20));
     const page = Math.max(1, Number(req.query.page || 1));
@@ -1147,7 +1147,7 @@ app.get('/events', async (req, res) => {
 
 app.get('/event/:id', async (req, res) => {
   try {
-    if (!checkReadKey(req)) return res.status(401).json({ error: 'unauthorized' });
+    if (!checkPrivateRead(req)) return res.status(401).json({ error: 'unauthorized' });
     const v = await KV.get(req.params.id);
     if (!v) return res.status(404).json({ error: 'not found' });
     const parsed = JSON.parse(v);
@@ -1163,7 +1163,6 @@ app.get('/event/:id', async (req, res) => {
 app.get('/trainers', async (req, res) => {
   try {
     if (!checkOrigin(req)) return res.status(403).json({ error: 'forbidden' });
-    if (!checkReadKey(req)) return res.status(401).json({ error: 'unauthorized' });
 
     const trainers = new Map();
 
@@ -1663,7 +1662,16 @@ async function cronCleanShort() {
   }
 }
 
-async function siteHealthFetchCheck(url, group = 'core') {
+function wait(ms) {
+  return new Promise(resolve => setTimeout(resolve, ms));
+}
+
+function isAbortLikeError(error) {
+  const text = String((error && (error.name || error.message)) || error || '');
+  return /abort|timeout|timed out/i.test(text);
+}
+
+async function siteHealthFetchOnce(url) {
   const started = Date.now();
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), SITE_HEALTH_CHECK_TIMEOUT_MS);
@@ -1676,20 +1684,51 @@ async function siteHealthFetchCheck(url, group = 'core') {
         'Accept': 'text/html,application/javascript,application/json,text/plain,*/*'
       }
     });
-    const duration = Date.now() - started;
+    return {
+      transport_ok: true,
+      ok: resp.ok,
+      status: resp.status,
+      duration_ms: Date.now() - started
+    };
+  } catch (e) {
+    return {
+      transport_ok: false,
+      ok: false,
+      duration_ms: Date.now() - started,
+      message: truncateString(e && e.message ? e.message : e, 500),
+      retryable: isAbortLikeError(e)
+    };
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
+async function siteHealthFetchCheck(url, group = 'core') {
+  let result = await siteHealthFetchOnce(url);
+  let attempts = 1;
+
+  if (!result.transport_ok && result.retryable) {
+    await wait(SITE_HEALTH_RETRY_DELAY_MS);
+    result = await siteHealthFetchOnce(url);
+    attempts = 2;
+  }
+
+  if (result.transport_ok) {
     await appendSiteHealthEvent({
       ts: Date.now(),
       iso: new Date().toISOString(),
       type: 'server_check',
       source: 'server',
       group,
-      ok: resp.ok,
+      ok: result.ok,
       resource: sanitizeUrl(url),
-      status: resp.status,
-      duration_ms: duration,
+      status: result.status,
+      duration_ms: result.duration_ms,
+      attempts,
+      detail: attempts > 1 ? 'retry_ok' : undefined,
       version: SITE_HEALTH_MONITOR_VERSION
     });
-  } catch (e) {
+  } else {
     await appendSiteHealthEvent({
       ts: Date.now(),
       iso: new Date().toISOString(),
@@ -1698,25 +1737,42 @@ async function siteHealthFetchCheck(url, group = 'core') {
       group,
       ok: false,
       resource: sanitizeUrl(url),
-      duration_ms: Date.now() - started,
-      message: truncateString(e && e.message ? e.message : e, 500),
+      duration_ms: result.duration_ms,
+      attempts,
+      message: result.message,
       version: SITE_HEALTH_MONITOR_VERSION
     });
-  } finally {
-    clearTimeout(timeout);
   }
 }
 
 async function cronSiteHealthChecks() {
-  for (const url of SITE_HEALTH_CHECK_URLS) {
-    const group = url.includes('api.barista-school.ru') ? 'api' : 'core';
-    await siteHealthFetchCheck(url, group);
+  if (__siteHealthRunning.core) {
+    console.warn('[site-health] Core checks skipped: previous run is still active');
+    return;
+  }
+  __siteHealthRunning.core = true;
+  try {
+    for (const url of SITE_HEALTH_CHECK_URLS) {
+      const group = url.includes('api.barista-school.ru') ? 'api' : 'core';
+      await siteHealthFetchCheck(url, group);
+    }
+  } finally {
+    __siteHealthRunning.core = false;
   }
 }
 
 async function cronSiteHealthServiceChecks() {
-  for (const url of SITE_HEALTH_SERVICE_CHECK_URLS) {
-    await siteHealthFetchCheck(url, 'service');
+  if (__siteHealthRunning.service) {
+    console.warn('[site-health] Service checks skipped: previous run is still active');
+    return;
+  }
+  __siteHealthRunning.service = true;
+  try {
+    for (const url of SITE_HEALTH_SERVICE_CHECK_URLS) {
+      await siteHealthFetchCheck(url, 'service');
+    }
+  } finally {
+    __siteHealthRunning.service = false;
   }
 }
 
@@ -1737,8 +1793,8 @@ if (!DISABLE_CRON) {
     await cronCleanShort();
   });
 
-  // Daily forced refresh at 04:20 MSK. Visitors always read the snapshot, not YClients directly.
-  cron.schedule('20 4 * * *', async () => {
+  // Regular forced refresh. Visitors always read the snapshot, not YClients directly.
+  cron.schedule(REVIEWS_SNAPSHOT_CRON, async () => {
     console.log('[cron] Refreshing reviews snapshot...');
     try {
       await refreshReviewsSnapshot({ force: true });
