@@ -569,6 +569,20 @@
     // Глобально отслеживаем открытый (развёрнутый) отзыв, чтобы держать открытым только один
     let openReviewKey = null;
 
+    // Извлекает только имя клиента из полного ФИО.
+    // YClients может возвращать: "ЖИРИКОВА ЕКАТЕРИНА ВЛАДИМИРОВНА 100562" или "Ольга Михайлова" или "Татьяна".
+    // Правило: убрать цифровой ID в конце; если ≥3 слова и всё в верхнем регистре — формат
+    // «Фамилия Имя Отчество», берём второе слово; иначе берём первое слово.
+    function extractFirstName(raw) {
+      if (!raw || raw === 'Аноним') return raw;
+      var cleaned = raw.replace(/\s+\d+\s*$/, '').trim();
+      if (!cleaned) return raw;
+      var parts = cleaned.split(/\s+/);
+      var isAllCaps = cleaned === cleaned.toUpperCase() && /[А-ЯЁA-Z]/.test(cleaned);
+      var name = (isAllCaps && parts.length >= 3) ? parts[1] : parts[0];
+      return name.charAt(0).toUpperCase() + name.slice(1).toLowerCase();
+    }
+
     // Стабильный ключ для отзыва (используется для сохранения состояния между перерисовками)
     function getReviewKey(it){
       try {
@@ -1145,6 +1159,7 @@
       }
 
       if (!author) author = 'Аноним';
+      author = extractFirstName(author);
       if (!master) master = 'Не указан';
 
   let rawText = c && c.text ? unescapeHtml(c.text) : (data && (data.text || data.message) ? unescapeHtml(data.text || data.message) : '');

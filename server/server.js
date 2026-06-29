@@ -128,6 +128,19 @@ app.use((req, res, next) => {
   }
 });
 
+// ─── Client name sanitization ────────────────────────────────────────────────
+// YClients may return full ФИО + client ID: "ЖИРИКОВА ЕКАТЕРИНА ВЛАДИМИРОВНА 100562"
+// We only store/display the first name.
+function extractFirstName(raw) {
+  if (!raw) return raw;
+  const cleaned = raw.replace(/\s+\d+\s*$/, '').trim();
+  if (!cleaned) return raw;
+  const parts = cleaned.split(/\s+/);
+  const isAllCaps = cleaned === cleaned.toUpperCase() && /[А-ЯЁA-Z]/.test(cleaned);
+  const name = (isAllCaps && parts.length >= 3) ? parts[1] : parts[0];
+  return name.charAt(0).toUpperCase() + name.slice(1).toLowerCase();
+}
+
 // ─── In-memory caches (same as original isolate caches) ─────────────────────
 
 let __staffCache = { ts: 0, map: {} };
@@ -226,8 +239,8 @@ function compactEvent(parsed) {
       date: data.date || data.created_at || null,
       id: data.id || null,
       rating: (typeof data.rating !== 'undefined') ? data.rating : (data.rate || data.score || data.stars || data.mark || data.value || data.grade || null),
-      author_name: data.client ? (data.client.name || data.client.full_name) : (data.user_name || data.client_name || data.author || data.name || data.user || null),
-      author_surname: data.author_surname || data.user_surname || null,
+      author_name: extractFirstName(data.client ? (data.client.name || data.client.full_name) : (data.user_name || data.client_name || data.author || data.name || data.user || null)),
+      author_surname: null,
       master_id: (typeof data.master_id !== 'undefined') ? data.master_id : (data.staff_id || null),
       master_name: data.staff ? (data.staff.name || data.staff.full_name) : (data.master_name || data.master || data.staff_name || data.trainer_name || null)
     };
@@ -637,7 +650,7 @@ function normalizeReviewComment(d, staffMap = {}, nameOverrides = {}) {
     date: (d && d.date) || null,
     id: (d && d.id) || null,
     rating: (d && typeof d.rating !== 'undefined') ? d.rating : 5,
-    author_name: (d && d.user_name) || null,
+    author_name: extractFirstName((d && d.user_name) || null),
     author_surname: null,
     master_id: mid,
     master_name: masterName || null
