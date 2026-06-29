@@ -136,8 +136,21 @@ function extractFirstName(raw) {
   const cleaned = raw.replace(/\s+\d+\s*$/, '').trim();
   if (!cleaned) return raw;
   const parts = cleaned.split(/\s+/);
-  const isAllCaps = cleaned === cleaned.toUpperCase() && /[А-ЯЁA-Z]/.test(cleaned);
-  const name = (isAllCaps && parts.length >= 3) ? parts[1] : parts[0];
+  let name;
+  if (parts.length <= 2) {
+    name = parts[0];
+  } else {
+    const isAllCaps = cleaned === cleaned.toUpperCase() && /[А-ЯЁA-Z]/.test(cleaned);
+    const patronymicRe = /(?:ович|евич|ёвич|овна|евна|ёвна|инична|ична)$/i;
+    const lastIsAbbrev = /^[А-ЯЁA-Z]{1,2}\.?$/.test(parts[parts.length - 1]);
+    if (isAllCaps || patronymicRe.test(parts[parts.length - 1]) || lastIsAbbrev) {
+      name = parts[1]; // Фамилия Имя Отчество
+    } else if (patronymicRe.test(parts[1])) {
+      name = parts[0]; // Имя Отчество Фамилия
+    } else {
+      name = parts[0];
+    }
+  }
   return name.charAt(0).toUpperCase() + name.slice(1).toLowerCase();
 }
 
