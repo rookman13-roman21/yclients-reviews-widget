@@ -1,0 +1,15 @@
+#!/usr/bin/env bash
+# Pre-commit: сканер секретов workspace МШБ.
+# Подключение (один раз на клон): git config core.hooksPath .githooks
+# Канон скрипта: mbs-design-system/scripts/secret-scan.sh
+ROOT="$(git rev-parse --show-toplevel)"
+for c in \
+  "$ROOT/scripts/secret-scan.sh" \
+  "$ROOT/../mbs-design-system/scripts/secret-scan.sh" \
+  "$ROOT/../../mbs-design-system/scripts/secret-scan.sh"; do
+  if [ -f "$c" ]; then
+    exec bash "$c"
+  fi
+done
+echo "secret-scan: mbs-design-system рядом не найден — проверка секретов пропущена."
+exit 0
