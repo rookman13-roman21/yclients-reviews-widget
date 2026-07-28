@@ -228,6 +228,19 @@ Timeout — через `SITE_HEALTH_CHECK_TIMEOUT_MS`.
 только доставленные ID и даты. До включения consumer создаёт baseline, поэтому
 история отзывов не отправляется.
 
+### Production-статус на 29.07.2026
+
+`INTERNAL_REVIEWS_FEED_PATH` настроен на
+`/opt/shared/yclients-reviews-feed.json`. Consumer `feedback_review_digest` в
+`bitrix-tools` подключён к этому файлу и отправляет только новые отзывы в
+тренерский Telegram-чат через Пиберри. Перед включением 897 уже существующих
+отзывов были сохранены consumer-ом как baseline без публикации истории.
+
+Feed не читать через nginx и не использовать как публичный API. При изменении
+его схемы или способа записи сначала обновить контракт в
+`bitrix-tools/docs/feedback-review-digest-runbook.md` и проверить, что
+невалидный либо устаревший snapshot не двигает журнал доставленных ID.
+
 ## Сервер: root@5.35.93.225
 
 - Путь: `/root/app/`
