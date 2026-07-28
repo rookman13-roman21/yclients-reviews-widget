@@ -10,6 +10,7 @@ const cron = require('node-cron');
 const path = require('path');
 const fs = require('fs');
 const KVStore = require('./kv-store');
+const { buildReviewFeed, writeFeedAtomic } = require('./review-feed');
 
 // ─── Config ──────────────────────────────────────────────────────────────────
 
@@ -19,10 +20,11 @@ const DEFAULT_TTL = 300;
 const REVIEWS_SNAPSHOT_KEY = 'reviews:snapshot:v1';
 const REVIEWS_SNAPSHOT_SCHEMA = 2;
 const REVIEWS_SNAPSHOT_TTL_MS = Math.max(5, Number(process.env.REVIEWS_SNAPSHOT_TTL_MINUTES || 60)) * 60 * 1000;
-const REVIEWS_SNAPSHOT_CRON = process.env.REVIEWS_SNAPSHOT_CRON || '17 * * * *';
+const REVIEWS_SNAPSHOT_CRON = process.env.REVIEWS_SNAPSHOT_CRON || '5,35 * * * *';
 const REVIEWS_SNAPSHOT_PAGE_SIZE = 200;
 const REVIEWS_SNAPSHOT_MAX_PAGES = 50;
 const REVIEWS_PUBLIC_CACHE_TTL = 300;
+const INTERNAL_REVIEWS_FEED_PATH = String(process.env.INTERNAL_REVIEWS_FEED_PATH || '').trim();
 const SITE_HEALTH_LOG_MAX_BYTES = 20 * 1024 * 1024;
 const SITE_HEALTH_MONITOR_VERSION = '20260608-2';
 const SITE_HEALTH_CHECK_INTERVAL = process.env.SITE_HEALTH_CHECK_INTERVAL || '*/1 * * * *';
@@ -638,6 +640,35 @@ function parseYclientsCommentsPayload(parsed) {
   return [];
 }
 
+function rawCommentRating(d) {
+  if (!d || typeof d !== 'object') return null;
+  for (const key of ['rating', 'rate', 'score', 'stars', 'mark', 'value', 'grade']) {
+    if (Object.prototype.hasOwnProperty.call(d, key) && d[key] !== null && d[key] !== '') return d[key];
+  }
+  return null;
+}
+
+function internalFeedReview(d, staffMap = {}, nameOverrides = {}) {
+  const text = String((d && d.text) || '').trim();
+  const id = d && d.id != null ? String(d.id).trim() : '';
+  if (!id || !text) return null;
+
+  const masterId = d && d.master_id != null ? String(d.master_id) : null;
+  let trainerName = masterId
+    ? (ID_OVERRIDES[masterId] || staffMap[masterId] || STAFF_MAP[Number(masterId)] || STAFF_MAP[masterId] || (d && d.master_name) || null)
+    : ((d && d.master_name) || null);
+  if (!trainerName && d && d.master_name && nameOverrides[d.master_name]) trainerName = nameOverrides[d.master_name];
+
+  return {
+    id,
+    date: (d && d.date) || null,
+    rating: rawCommentRating(d),
+    clientName: extractFirstName((d && d.user_name) || null),
+    trainerName,
+    text
+  };
+}
+
 function normalizeReviewComment(d, staffMap = {}, nameOverrides = {}) {
   const mid = d && d.master_id != null ? String(d.master_id) : null;
   if (!mid) return null;
@@ -662,7 +693,7 @@ function normalizeReviewComment(d, staffMap = {}, nameOverrides = {}) {
     text,
     date: (d && d.date) || null,
     id: (d && d.id) || null,
-    rating: (d && typeof d.rating !== 'undefined') ? d.rating : 5,
+    rating: rawCommentRating(d) ?? 5,
     author_name: extractFirstName((d && d.user_name) || null),
     author_surname: null,
     master_id: mid,
@@ -681,7 +712,7 @@ function normalizeReviewComment(d, staffMap = {}, nameOverrides = {}) {
         master_id: mid,
         text,
         date: (d && d.date) || null,
-        rating: (d && typeof d.rating !== 'undefined') ? d.rating : 5,
+        rating: rawCommentRating(d) ?? 5,
         user_name: (d && d.user_name) || '',
         user_avatar: (d && d.user_avatar) || '',
         master_name: masterName || (d && d.master_name) || null,
@@ -767,6 +798,7 @@ async function refreshReviewsSnapshot({ force = false } = {}) {
     const staffMap = await getStaffMapCached();
     const nameOverrides = await getNameOverridesCached();
     const items = [];
+    const internalFeedItems = [];
     let page = 1;
     let pagesLoaded = 0;
 
@@ -790,6 +822,8 @@ async function refreshReviewsSnapshot({ force = false } = {}) {
       for (const d of dataArr) {
         const normalized = normalizeReviewComment(d, staffMap, nameOverrides);
         if (normalized) items.push(normalized);
+        const internalFeedItem = internalFeedReview(d, staffMap, nameOverrides);
+        if (internalFeedItem) internalFeedItems.push(internalFeedItem);
       }
 
       pagesLoaded++;
@@ -808,6 +842,10 @@ async function refreshReviewsSnapshot({ force = false } = {}) {
       source: 'yclients-comments-daily'
     };
     await saveReviewsSnapshot(snapshot);
+    if (INTERNAL_REVIEWS_FEED_PATH) {
+      const feed = buildReviewFeed(internalFeedItems);
+      writeFeedAtomic(INTERNAL_REVIEWS_FEED_PATH, feed);
+    }
     await KV.put('reviews:snapshot:last_refresh', String(snapshot.ts));
     console.log('[reviews] Snapshot refreshed: ' + items.length + ' reviews, pages=' + pagesLoaded);
     return snapshot;
