@@ -17,6 +17,26 @@ test('internal feed keeps null ratings and permits a missing trainer', () => {
   });
 });
 
+test('internal feed permits visit context but never serializes a client identifier', () => {
+  const item = normalizeFeedReview({
+    id: '43',
+    date: '2026-07-30T12:00:00+03:00',
+    rating: 4,
+    clientName: 'Аня',
+    trainerName: 'Никита',
+    clientId: 'private-client-id',
+    lastVisit: { date: '2026-07-29T10:00:00+03:00', serviceTitle: 'Основы бариста' },
+    text: 'Очень полезное занятие'
+  });
+
+  assert.deepEqual(item.last_visit, {
+    date: '2026-07-29T10:00:00+03:00',
+    service_title: 'Основы бариста'
+  });
+  assert.equal(Object.hasOwn(item, 'client_id'), false);
+  assert.equal(JSON.stringify(item).includes('private-client-id'), false);
+});
+
 test('internal feed deduplicates stable IDs and rejects records without them', () => {
   const feed = buildReviewFeed([
     { id: 'one', date: '2026-07-28T10:00:00Z', rating: 5, text: 'Первый вариант' },
@@ -38,5 +58,15 @@ test('atomic writer never exposes an incomplete JSON file', () => {
 
   assert.deepEqual(JSON.parse(fs.readFileSync(target, 'utf8')), feed);
   assert.deepEqual(fs.readdirSync(directory).filter(name => name.endsWith('.tmp')), []);
+  fs.rmSync(directory, { recursive: true, force: true });
+});
+
+test('atomic writer rejects accidental client identifiers in the private feed', () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'reviews-feed-'));
+  const target = path.join(directory, 'feed.json');
+  const feed = buildReviewFeed([{ id: 'one', rating: 5, text: 'Отзыв' }]);
+  feed.items[0].client_id = 'must-not-be-published';
+
+  assert.throws(() => writeFeedAtomic(target, feed), /must not contain client IDs/);
   fs.rmSync(directory, { recursive: true, force: true });
 });

@@ -11,6 +11,12 @@ const path = require('path');
 const fs = require('fs');
 const KVStore = require('./kv-store');
 const { buildReviewFeed, writeFeedAtomic } = require('./review-feed');
+const {
+  enrichReviewItems,
+  getOrCreateEnrichmentSince,
+  readRecordsSnapshotIndex,
+  reviewClientId
+} = require('./review-visit-enrichment');
 
 // ─── Config ──────────────────────────────────────────────────────────────────
 
@@ -25,6 +31,9 @@ const REVIEWS_SNAPSHOT_PAGE_SIZE = 200;
 const REVIEWS_SNAPSHOT_MAX_PAGES = 50;
 const REVIEWS_PUBLIC_CACHE_TTL = 300;
 const INTERNAL_REVIEWS_FEED_PATH = String(process.env.INTERNAL_REVIEWS_FEED_PATH || '').trim();
+const YCLIENTS_RECORDS_SNAPSHOT_PATH = String(
+  process.env.YCLIENTS_RECORDS_SNAPSHOT_PATH || '/opt/shared/yclients-records-snapshot.json'
+).trim();
 const SITE_HEALTH_LOG_MAX_BYTES = 20 * 1024 * 1024;
 const SITE_HEALTH_MONITOR_VERSION = '20260608-2';
 const SITE_HEALTH_CHECK_INTERVAL = process.env.SITE_HEALTH_CHECK_INTERVAL || '*/1 * * * *';
@@ -665,8 +674,32 @@ function internalFeedReview(d, staffMap = {}, nameOverrides = {}) {
     rating: rawCommentRating(d),
     clientName: extractFirstName((d && d.user_name) || null),
     trainerName,
+    // This is an internal-only join key. review-feed.js intentionally drops it
+    // before publishing the private feed, so no client ID reaches Telegram.
+    clientId: reviewClientId(d),
     text
   };
+}
+
+async function enrichInternalFeedItems(items) {
+  if (!items.length || !YCLIENTS_RECORDS_SNAPSHOT_PATH) return { items, stats: null };
+  const since = await getOrCreateEnrichmentSince(KV);
+  const hasEligibleReview = items.some(item => {
+    const timestamp = Date.parse(String(item.date || ''));
+    return Number.isFinite(timestamp) && timestamp >= since;
+  });
+  if (!hasEligibleReview) {
+    return { items: items.map(({ clientId, ...publicItem }) => publicItem), stats: null };
+  }
+  try {
+    const visitIndex = readRecordsSnapshotIndex(YCLIENTS_RECORDS_SNAPSHOT_PATH);
+    return await enrichReviewItems(items, { kv: KV, visitIndex, since });
+  } catch (error) {
+    // A missing optional context must never interrupt the public reviews
+    // snapshot or lose a Telegram review. Do not log snapshot contents.
+    console.warn('[reviews] Visit context unavailable:', error && error.constructor ? error.constructor.name : 'Error');
+    return { items: items.map(({ clientId, ...publicItem }) => publicItem), stats: null };
+  }
 }
 
 function normalizeReviewComment(d, staffMap = {}, nameOverrides = {}) {
@@ -843,8 +876,14 @@ async function refreshReviewsSnapshot({ force = false } = {}) {
     };
     await saveReviewsSnapshot(snapshot);
     if (INTERNAL_REVIEWS_FEED_PATH) {
-      const feed = buildReviewFeed(internalFeedItems);
+      const enrichedFeed = await enrichInternalFeedItems(internalFeedItems);
+      const feed = buildReviewFeed(enrichedFeed.items);
       writeFeedAtomic(INTERNAL_REVIEWS_FEED_PATH, feed);
+      if (enrichedFeed.stats) {
+        const stats = enrichedFeed.stats;
+        console.log('[reviews] Visit context: eligible=' + stats.eligible + ', linked=' + stats.linked
+          + ', found=' + stats.found + ', missing_client_id=' + stats.missingClientId);
+      }
     }
     await KV.put('reviews:snapshot:last_refresh', String(snapshot.ts));
     console.log('[reviews] Snapshot refreshed: ' + items.length + ' reviews, pages=' + pagesLoaded);
