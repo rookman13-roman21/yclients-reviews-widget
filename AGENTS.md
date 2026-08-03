@@ -8,7 +8,7 @@
 - **Production:** hosted-фрагмент `server/public/widgets/reviews.js`; в Tilda вставлен `tilda-embed.html` (один раз).
 - **Где править:** исходник `reviews-widget.html`; после правок пересобрать `scripts/build-hosted-widget.js`.
 - **Как проверить:** блок отзывов на сайте.
-- **Как деплоится:** сборка → hosted-файл на сервере (см. README).
+- **Как деплоится:** сайт-виджет собирается в hosted-файл; изменения private feed выкладываются отдельным bundle из `server/server.js`, `server/review-feed.js` и `server/review-visit-enrichment.js` с перезапуском PM2 `barista-reviews` (см. README).
 - **Контур выпуска:** `reviews-widget.html` собирается в hosted loader и bundle на сервере; Tilda один раз подключает loader через `tilda-embed.html`.
 - **Доказательство версии в production:** release marker, server hash и commit SHA не фиксируются; проверка — публичный hosted URL и блок отзывов на сайте.
 - **Откат:** автоматического отката нет; вручную поставить предыдущие проверенные loader/bundle и при необходимости вернуть cache-buster Tilda.

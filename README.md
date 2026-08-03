@@ -312,6 +312,22 @@ scp -i ~/.ssh/id_ed25519 server/public/widgets/reviews.js root@5.35.93.225:/root
 ssh -i ~/.ssh/id_ed25519 root@5.35.93.225 'pm2 restart barista-reviews'
 ```
 
+### Изменить private feed для Telegram
+
+Контракт private feed состоит из трёх связанных файлов:
+`server/server.js`, `server/review-feed.js` и
+`server/review-visit-enrichment.js`. При изменении логики или схемы feed
+выкладывать все изменившиеся файлы из этого набора, а не только `server.js`.
+Перед заменой сохранять резервную копию production-файла, затем проверять
+загрузку Node.js, перезапускать только `barista-reviews` и подтверждать, что
+в `/opt/shared/yclients-reviews-feed.json` появился ожидаемый санированный
+контекст визита. Не выводить и не публиковать client ID, телефон, e-mail или
+полный ответ API.
+
+Для изменения сериализации `last_visit` обязателен `server/review-feed.js`:
+если его не выложить вместе с новой логикой обогащения, визит может быть
+найден в кэше, но не попасть в Telegram-карточку.
+
 ### Код для Tilda
 
 Вставить один раз в HTML-блок Tilda:
