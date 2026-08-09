@@ -73,7 +73,10 @@ test('compares yClients local datetimes in Moscow time', () => {
 
 test('uses only explicit client identifiers from the review, never the name or phone', () => {
   assert.equal(reviewClientId({ client_id: 11, user_name: 'Аня' }), '11');
-  assert.equal(reviewClientId({ user: { id: 12 }, user_name: 'Аня' }), '12');
+  assert.equal(reviewClientId({ user: { client_id: 12 }, user_name: 'Аня' }), '12');
+  assert.equal(reviewClientId({ client: { id: 13 }, user_name: 'Аня' }), '13');
+  assert.equal(reviewClientId({ user_id: 14, user_name: 'Аня' }), null);
+  assert.equal(reviewClientId({ user: { id: 15 }, user_name: 'Аня' }), null);
   assert.equal(reviewClientId({ user_name: 'Аня', user_phone: '+79990000000' }), null);
 });
 
@@ -111,7 +114,7 @@ test('uses a phone fallback only for one exact snapshot client and never exposes
   const phoneIndex = buildRecordsPhoneIndex(records);
   const phone = '79990000000';
   const items = [{
-    id: 'review-phone-1', date: '2026-07-28T18:00:00+03:00', clientId: 'nonmatching-comment-user',
+    id: 'review-phone-1', date: '2026-07-28T18:00:00+03:00',
     clientPhone: phone, clientName: 'Аня', trainerName: 'Никита', rating: 5, text: 'Спасибо'
   }];
 
@@ -126,6 +129,22 @@ test('uses a phone fallback only for one exact snapshot client and never exposes
   });
   assert.equal(JSON.stringify(result.items[0]).includes(phone), false);
   assert.equal(JSON.stringify([...kv.values.values()]).includes(phone), false);
+});
+
+test('does not use a phone when an explicit client ID has no snapshot visit', async () => {
+  const kv = memoryKv();
+  const result = await enrichReviewItems([{
+    id: 'review-id-without-visit', date: '2026-07-28T18:00:00+03:00', clientId: '111',
+    clientPhone: '79990000000', text: 'Спасибо'
+  }], {
+    kv,
+    visitIndex: buildRecordsIndex(records),
+    phoneIndex: buildRecordsPhoneIndex(records),
+    since: Date.parse('2026-07-28T00:00:00+03:00'), now: 100
+  });
+
+  assert.equal(result.stats.phoneResolved, 0);
+  assert.equal(Object.hasOwn(result.items[0], 'lastVisit'), false);
 });
 
 test('keeps a successful client ID match ahead of a different phone match', async () => {

@@ -57,10 +57,11 @@ function reviewClientId(comment) {
   if (!comment || typeof comment !== 'object') return null;
   const user = comment.user && typeof comment.user === 'object' ? comment.user : {};
   const client = comment.client && typeof comment.client === 'object' ? comment.client : {};
+  // `user_id` identifies a comment user, not necessarily a yClients client
+  // record. Production data has shown the two ID spaces can differ, so never
+  // let a comment-user ID suppress the guarded phone fallback below.
   return cleanId(comment.client_id)
-    || cleanId(comment.user_id)
     || cleanId(user.client_id)
-    || cleanId(user.id)
     || cleanId(client.id);
 }
 
@@ -255,7 +256,7 @@ async function enrichReviewItems(items, { kv, visitIndex, phoneIndex, since, now
     let lastVisit = item.clientId
       ? lastVisitBeforeReview(visitIndex instanceof Map ? visitIndex.get(String(item.clientId)) : null, reviewDate)
       : null;
-    if (!lastVisit) {
+    if (!lastVisit && !item.clientId) {
       const phoneResult = lastVisitByUniquePhone(phoneIndex, visitIndex, item.clientPhone, reviewDate);
       if (phoneResult.lastVisit) {
         lastVisit = phoneResult.lastVisit;
