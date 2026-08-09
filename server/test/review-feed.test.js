@@ -25,6 +25,7 @@ test('internal feed permits visit context but never serializes a client identifi
     clientName: 'Аня',
     trainerName: 'Никита',
     clientId: 'private-client-id',
+    clientPhone: '+79990000000',
     lastVisit: { date: '2026-07-29T10:00:00+03:00', serviceTitle: 'Основы бариста' },
     text: 'Очень полезное занятие'
   });
@@ -35,6 +36,7 @@ test('internal feed permits visit context but never serializes a client identifi
   });
   assert.equal(Object.hasOwn(item, 'client_id'), false);
   assert.equal(JSON.stringify(item).includes('private-client-id'), false);
+  assert.equal(JSON.stringify(item).includes('79990000000'), false);
 });
 
 test('internal feed deduplicates stable IDs and rejects records without them', () => {

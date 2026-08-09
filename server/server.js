@@ -15,7 +15,8 @@ const {
   enrichReviewItems,
   getOrCreateEnrichmentSince,
   readRecordsSnapshotIndex,
-  reviewClientId
+  reviewClientId,
+  reviewPhone
 } = require('./review-visit-enrichment');
 
 // ─── Config ──────────────────────────────────────────────────────────────────
@@ -677,6 +678,9 @@ function internalFeedReview(d, staffMap = {}, nameOverrides = {}) {
     // This is an internal-only join key. review-feed.js intentionally drops it
     // before publishing the private feed, so no client ID reaches Telegram.
     clientId: reviewClientId(d),
+    // Phone is a strict fallback only when the explicit review identifier has
+    // no matching visit. review-feed.js and the KV cache never publish it.
+    clientPhone: reviewPhone(d),
     text
   };
 }
@@ -689,16 +693,21 @@ async function enrichInternalFeedItems(items) {
     return Number.isFinite(timestamp) && timestamp >= since;
   });
   if (!hasEligibleReview) {
-    return { items: items.map(({ clientId, ...publicItem }) => publicItem), stats: null };
+    return { items: items.map(({ clientId, clientPhone, ...publicItem }) => publicItem), stats: null };
   }
   try {
-    const visitIndex = readRecordsSnapshotIndex(YCLIENTS_RECORDS_SNAPSHOT_PATH);
-    return await enrichReviewItems(items, { kv: KV, visitIndex, since });
+    const visitIndexes = readRecordsSnapshotIndex(YCLIENTS_RECORDS_SNAPSHOT_PATH);
+    return await enrichReviewItems(items, {
+      kv: KV,
+      visitIndex: visitIndexes.clientIndex,
+      phoneIndex: visitIndexes.phoneIndex,
+      since
+    });
   } catch (error) {
     // A missing optional context must never interrupt the public reviews
     // snapshot or lose a Telegram review. Do not log snapshot contents.
     console.warn('[reviews] Visit context unavailable:', error && error.constructor ? error.constructor.name : 'Error');
-    return { items: items.map(({ clientId, ...publicItem }) => publicItem), stats: null };
+    return { items: items.map(({ clientId, clientPhone, ...publicItem }) => publicItem), stats: null };
   }
 }
 
@@ -882,7 +891,8 @@ async function refreshReviewsSnapshot({ force = false } = {}) {
       if (enrichedFeed.stats) {
         const stats = enrichedFeed.stats;
         console.log('[reviews] Visit context: eligible=' + stats.eligible + ', linked=' + stats.linked
-          + ', found=' + stats.found + ', missing_client_id=' + stats.missingClientId);
+          + ', found=' + stats.found + ', missing_client_id=' + stats.missingClientId
+          + ', phone_resolved=' + stats.phoneResolved + ', phone_ambiguous=' + stats.phoneAmbiguous);
       }
     }
     await KV.put('reviews:snapshot:last_refresh', String(snapshot.ts));
