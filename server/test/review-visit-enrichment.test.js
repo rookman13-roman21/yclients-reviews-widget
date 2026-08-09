@@ -2,11 +2,13 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 
 const {
+  buildRecordsPhoneIndex,
   buildRecordsIndex,
   enrichReviewItems,
   getOrCreateEnrichmentSince,
   lastVisitBeforeReview,
-  reviewClientId
+  reviewClientId,
+  reviewPhone
 } = require('../review-visit-enrichment');
 
 function memoryKv() {
@@ -75,6 +77,12 @@ test('uses only explicit client identifiers from the review, never the name or p
   assert.equal(reviewClientId({ user_name: 'Аня', user_phone: '+79990000000' }), null);
 });
 
+test('normalizes an explicit review phone without treating it as a client ID', () => {
+  assert.equal(reviewPhone({ user_phone: '8 (999) 000-00-00' }), '79990000000');
+  assert.equal(reviewPhone({ user_phone: '9990000000' }), '79990000000');
+  assert.equal(reviewPhone({ user_phone: '999000000' }), null);
+});
+
 test('caches review visit context by review ID and keeps client IDs out of the feed item', async () => {
   const kv = memoryKv();
   const index = buildRecordsIndex(records);
@@ -95,6 +103,93 @@ test('caches review visit context by review ID and keeps client IDs out of the f
   assert.deepEqual(second.items[0].lastVisit, first.items[0].lastVisit);
   assert.equal(Object.hasOwn(second.items[0], 'clientId'), false);
   assert.equal(JSON.stringify(second.items[0]).includes('11'), false);
+});
+
+test('uses a phone fallback only for one exact snapshot client and never exposes the phone', async () => {
+  const kv = memoryKv();
+  const visitIndex = buildRecordsIndex(records);
+  const phoneIndex = buildRecordsPhoneIndex(records);
+  const phone = '79990000000';
+  const items = [{
+    id: 'review-phone-1', date: '2026-07-28T18:00:00+03:00', clientId: 'nonmatching-comment-user',
+    clientPhone: phone, clientName: 'Аня', trainerName: 'Никита', rating: 5, text: 'Спасибо'
+  }];
+
+  const result = await enrichReviewItems(items, {
+    kv, visitIndex, phoneIndex, since: Date.parse('2026-07-28T00:00:00+03:00'), now: 100
+  });
+
+  assert.equal(result.stats.phoneResolved, 1);
+  assert.deepEqual(result.items[0].lastVisit, {
+    date: '2026-07-28T15:00:00+03:00',
+    service_title: 'Латте-арт'
+  });
+  assert.equal(JSON.stringify(result.items[0]).includes(phone), false);
+  assert.equal(JSON.stringify([...kv.values.values()]).includes(phone), false);
+});
+
+test('keeps a successful client ID match ahead of a different phone match', async () => {
+  const kv = memoryKv();
+  const recordsWithDifferentPhone = {
+    records: [...records.records, {
+      client: { id: 22, phone: '+79991111111' },
+      datetime: '2026-07-28T17:00:00+03:00', attendance: 1,
+      services: [{ title: 'Телефонный fallback не должен выбраться' }]
+    }]
+  };
+  const result = await enrichReviewItems([{
+    id: 'review-id-priority', date: '2026-07-28T18:00:00+03:00', clientId: '11',
+    clientPhone: '79991111111', text: 'Спасибо'
+  }], {
+    kv,
+    visitIndex: buildRecordsIndex(recordsWithDifferentPhone),
+    phoneIndex: buildRecordsPhoneIndex(recordsWithDifferentPhone),
+    since: Date.parse('2026-07-28T00:00:00+03:00'), now: 100
+  });
+
+  assert.equal(result.stats.phoneResolved, 0);
+  assert.deepEqual(result.items[0].lastVisit, {
+    date: '2026-07-28T15:00:00+03:00',
+    service_title: 'Латте-арт'
+  });
+});
+
+test('does not resolve a program from an invalid phone', async () => {
+  const kv = memoryKv();
+  const result = await enrichReviewItems([{
+    id: 'review-invalid-phone', date: '2026-07-28T18:00:00+03:00',
+    clientPhone: '999000000', text: 'Спасибо'
+  }], {
+    kv,
+    visitIndex: buildRecordsIndex(records),
+    phoneIndex: buildRecordsPhoneIndex(records),
+    since: Date.parse('2026-07-28T00:00:00+03:00'), now: 100
+  });
+
+  assert.equal(result.stats.phoneUnavailable, 1);
+  assert.equal(Object.hasOwn(result.items[0], 'lastVisit'), false);
+});
+
+test('refuses a phone fallback shared by multiple snapshot clients', async () => {
+  const kv = memoryKv();
+  const duplicatedPhoneRecords = {
+    records: [...records.records, {
+      client: { id: 22, phone: '+79990000000' },
+      datetime: '2026-07-28T12:00:00+03:00', attendance: 1,
+      services: [{ title: 'Другой визит' }]
+    }]
+  };
+  const result = await enrichReviewItems([{
+    id: 'review-phone-ambiguous', date: '2026-07-28T18:00:00+03:00', clientPhone: '79990000000', text: 'Спасибо'
+  }], {
+    kv,
+    visitIndex: buildRecordsIndex(duplicatedPhoneRecords),
+    phoneIndex: buildRecordsPhoneIndex(duplicatedPhoneRecords),
+    since: Date.parse('2026-07-28T00:00:00+03:00'), now: 100
+  });
+
+  assert.equal(result.stats.phoneAmbiguous, 1);
+  assert.equal(Object.hasOwn(result.items[0], 'lastVisit'), false);
 });
 
 test('creates the historic boundary once so existing reviews are not enriched', async () => {

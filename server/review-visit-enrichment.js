@@ -1,8 +1,9 @@
 const fs = require('fs');
 
-const VISIT_CONTEXT_CACHE_PREFIX = 'reviews:visit-context:v1:';
+const VISIT_CONTEXT_CACHE_PREFIX = 'reviews:visit-context:v2:';
 const VISIT_CONTEXT_SINCE_KEY = 'reviews:visit-context:v1:since';
 const NOT_FOUND_RECHECK_MS = 6 * 60 * 60 * 1000;
+const VISIT_CONTEXT_CACHE_SCHEMA = 2;
 
 let recordsSnapshotCache = {
   path: '',
@@ -18,6 +19,13 @@ function cleanText(value) {
 function cleanId(value) {
   const text = cleanText(value);
   return text || null;
+}
+
+function normalizePhone(value) {
+  let digits = cleanText(value).replace(/\D/g, '');
+  if (digits.length === 11 && digits.startsWith('8')) digits = '7' + digits.slice(1);
+  if (digits.length === 10 && digits.startsWith('9')) digits = '7' + digits;
+  return /^7\d{10}$/.test(digits) ? digits : null;
 }
 
 function parseDateTime(value) {
@@ -56,6 +64,17 @@ function reviewClientId(comment) {
     || cleanId(client.id);
 }
 
+function reviewPhone(comment) {
+  if (!comment || typeof comment !== 'object') return null;
+  const user = comment.user && typeof comment.user === 'object' ? comment.user : {};
+  const client = comment.client && typeof comment.client === 'object' ? comment.client : {};
+  return normalizePhone(comment.user_phone)
+    || normalizePhone(comment.phone)
+    || normalizePhone(user.phone)
+    || normalizePhone(comment.client_phone)
+    || normalizePhone(client.phone);
+}
+
 function isCompletedVisit(record) {
   if (!record || typeof record !== 'object') return false;
   if (record.deleted || record.is_deleted || record.cancelled || record.canceled) return false;
@@ -88,23 +107,53 @@ function normalizedVisit(record) {
   };
 }
 
-function buildRecordsIndex(payload) {
+function recordClientId(record) {
+  const client = record && record.client && typeof record.client === 'object' ? record.client : {};
+  return cleanId(record && record.client_id) || cleanId(client.id);
+}
+
+function recordPhones(record) {
+  const client = record && record.client && typeof record.client === 'object' ? record.client : {};
+  return [...new Set([
+    normalizePhone(record && record.phone),
+    normalizePhone(client.phone),
+    normalizePhone(client.mobile),
+    normalizePhone(client.mobile_phone)
+  ].filter(Boolean))];
+}
+
+function buildRecordIndexes(payload) {
   const records = payload && Array.isArray(payload.records) ? payload.records : null;
   if (!records) throw new Error('records snapshot is invalid');
 
-  const index = new Map();
+  const clientIndex = new Map();
+  const phoneIndex = new Map();
   for (const record of records) {
     if (!record || typeof record !== 'object') continue;
-    const client = record.client && typeof record.client === 'object' ? record.client : {};
-    const clientId = cleanId(record.client_id) || cleanId(client.id);
+    const clientId = recordClientId(record);
+    if (clientId) {
+      for (const phone of recordPhones(record)) {
+        const clientIds = phoneIndex.get(phone) || new Set();
+        clientIds.add(clientId);
+        phoneIndex.set(phone, clientIds);
+      }
+    }
     const visit = normalizedVisit(record);
     if (!clientId || !visit) continue;
-    const visits = index.get(clientId) || [];
+    const visits = clientIndex.get(clientId) || [];
     visits.push(visit);
-    index.set(clientId, visits);
+    clientIndex.set(clientId, visits);
   }
-  for (const visits of index.values()) visits.sort((left, right) => left.timestamp - right.timestamp);
-  return index;
+  for (const visits of clientIndex.values()) visits.sort((left, right) => left.timestamp - right.timestamp);
+  return { clientIndex, phoneIndex };
+}
+
+function buildRecordsIndex(payload) {
+  return buildRecordIndexes(payload).clientIndex;
+}
+
+function buildRecordsPhoneIndex(payload) {
+  return buildRecordIndexes(payload).phoneIndex;
 }
 
 function readRecordsSnapshotIndex(snapshotPath) {
@@ -119,9 +168,9 @@ function readRecordsSnapshotIndex(snapshotPath) {
   }
 
   const payload = JSON.parse(fs.readFileSync(snapshotPath, 'utf8'));
-  const index = buildRecordsIndex(payload);
-  recordsSnapshotCache = { path: snapshotPath, mtimeMs: stat.mtimeMs, size: stat.size, index };
-  return index;
+  const indexes = buildRecordIndexes(payload);
+  recordsSnapshotCache = { path: snapshotPath, mtimeMs: stat.mtimeMs, size: stat.size, index: indexes };
+  return indexes;
 }
 
 function lastVisitBeforeReview(visits, reviewDate) {
@@ -139,18 +188,31 @@ function lastVisitBeforeReview(visits, reviewDate) {
   return null;
 }
 
+function lastVisitByUniquePhone(phoneIndex, visitIndex, phone, reviewDate) {
+  const normalizedPhone = normalizePhone(phone);
+  if (!normalizedPhone || !(phoneIndex instanceof Map)) return { status: 'unavailable', lastVisit: null };
+  const clientIds = phoneIndex.get(normalizedPhone);
+  if (!clientIds || clientIds.size === 0) return { status: 'not_found', lastVisit: null };
+  if (clientIds.size !== 1) return { status: 'ambiguous', lastVisit: null };
+  const [clientId] = clientIds;
+  return {
+    status: 'unique',
+    lastVisit: lastVisitBeforeReview(visitIndex instanceof Map ? visitIndex.get(clientId) : null, reviewDate)
+  };
+}
+
 function cachedVisitContext(raw, reviewDate, now) {
   if (!raw) return undefined;
   let parsed = null;
   try { parsed = JSON.parse(raw); } catch (_) { return undefined; }
-  if (!parsed || parsed.schema_version !== 1 || parsed.review_date !== reviewDate) return undefined;
+  if (!parsed || parsed.schema_version !== VISIT_CONTEXT_CACHE_SCHEMA || parsed.review_date !== reviewDate) return undefined;
   if (parsed.last_visit) return parsed.last_visit;
   const resolvedAt = Number(parsed.resolved_at || 0);
   return Number.isFinite(resolvedAt) && now - resolvedAt < NOT_FOUND_RECHECK_MS ? null : undefined;
 }
 
 function publicReviewItem(item) {
-  const { clientId, lastVisit, ...publicItem } = item;
+  const { clientId, clientPhone, lastVisit, ...publicItem } = item;
   return lastVisit ? { ...publicItem, lastVisit } : publicItem;
 }
 
@@ -163,9 +225,12 @@ async function getOrCreateEnrichmentSince(kv, now = Date.now()) {
   return parseDateTime(created);
 }
 
-async function enrichReviewItems(items, { kv, visitIndex, since, now = Date.now() }) {
+async function enrichReviewItems(items, { kv, visitIndex, phoneIndex, since, now = Date.now() }) {
   const enriched = [];
-  const stats = { eligible: 0, linked: 0, missingClientId: 0, found: 0, notFound: 0, cached: 0 };
+  const stats = {
+    eligible: 0, linked: 0, missingClientId: 0, found: 0, notFound: 0, cached: 0,
+    phoneResolved: 0, phoneAmbiguous: 0, phoneUnavailable: 0
+  };
   for (const item of items || []) {
     const reviewDate = cleanText(item && item.date);
     const reviewTimestamp = parseDateTime(reviewDate);
@@ -175,13 +240,8 @@ async function enrichReviewItems(items, { kv, visitIndex, since, now = Date.now(
     }
 
     stats.eligible += 1;
-    if (!item.clientId) {
-      stats.missingClientId += 1;
-      enriched.push(publicReviewItem(item));
-      continue;
-    }
-
-    stats.linked += 1;
+    if (item.clientId) stats.linked += 1;
+    else stats.missingClientId += 1;
     const cacheKey = VISIT_CONTEXT_CACHE_PREFIX + String(item.id);
     const cached = cachedVisitContext(await kv.get(cacheKey), reviewDate, now);
     if (typeof cached !== 'undefined') {
@@ -192,9 +252,22 @@ async function enrichReviewItems(items, { kv, visitIndex, since, now = Date.now(
       continue;
     }
 
-    const lastVisit = lastVisitBeforeReview(visitIndex.get(String(item.clientId)), reviewDate);
+    let lastVisit = item.clientId
+      ? lastVisitBeforeReview(visitIndex instanceof Map ? visitIndex.get(String(item.clientId)) : null, reviewDate)
+      : null;
+    if (!lastVisit) {
+      const phoneResult = lastVisitByUniquePhone(phoneIndex, visitIndex, item.clientPhone, reviewDate);
+      if (phoneResult.lastVisit) {
+        lastVisit = phoneResult.lastVisit;
+        stats.phoneResolved += 1;
+      } else if (phoneResult.status === 'ambiguous') {
+        stats.phoneAmbiguous += 1;
+      } else if (phoneResult.status === 'unavailable') {
+        stats.phoneUnavailable += 1;
+      }
+    }
     await kv.put(cacheKey, JSON.stringify({
-      schema_version: 1,
+      schema_version: VISIT_CONTEXT_CACHE_SCHEMA,
       review_date: reviewDate,
       last_visit: lastVisit,
       resolved_at: now
@@ -209,11 +282,14 @@ async function enrichReviewItems(items, { kv, visitIndex, since, now = Date.now(
 module.exports = {
   VISIT_CONTEXT_CACHE_PREFIX,
   VISIT_CONTEXT_SINCE_KEY,
+  buildRecordsPhoneIndex,
   buildRecordsIndex,
   enrichReviewItems,
   getOrCreateEnrichmentSince,
   isCompletedVisit,
   lastVisitBeforeReview,
+  normalizePhone,
   readRecordsSnapshotIndex,
-  reviewClientId
+  reviewClientId,
+  reviewPhone
 };
