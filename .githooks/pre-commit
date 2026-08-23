@@ -2,14 +2,29 @@
 # Pre-commit: сканер секретов workspace МШБ.
 # Подключение (один раз на клон): git config core.hooksPath .githooks
 # Канон скрипта: mbs-design-system/scripts/secret-scan.sh
+set -euo pipefail
+
 ROOT="$(git rev-parse --show-toplevel)"
+MAIN_ROOT="$(git worktree list --porcelain | awk '/^worktree / { print substr($0, 10); exit }')"
+
+if [ -z "$MAIN_ROOT" ]; then
+  MAIN_ROOT="$ROOT"
+fi
+
 for c in \
   "$ROOT/scripts/secret-scan.sh" \
-  "$ROOT/../mbs-design-system/scripts/secret-scan.sh" \
-  "$ROOT/../../mbs-design-system/scripts/secret-scan.sh"; do
+  "$MAIN_ROOT/scripts/secret-scan.sh" \
+  "$MAIN_ROOT/../mbs-design-system/scripts/secret-scan.sh" \
+  "$MAIN_ROOT/../../mbs-design-system/scripts/secret-scan.sh"; do
   if [ -f "$c" ]; then
     exec bash "$c"
   fi
 done
-echo "secret-scan: mbs-design-system рядом не найден — проверка секретов пропущена."
-exit 0
+
+if [ -n "${MBS_DESIGN_SYSTEM_ROOT:-}" ] && \
+  [ -f "$MBS_DESIGN_SYSTEM_ROOT/scripts/secret-scan.sh" ]; then
+  exec bash "$MBS_DESIGN_SYSTEM_ROOT/scripts/secret-scan.sh"
+fi
+
+echo "ERROR: canonical secret scanner not found. Set MBS_DESIGN_SYSTEM_ROOT to the mbs-design-system checkout." >&2
+exit 1
