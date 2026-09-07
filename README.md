@@ -14,7 +14,8 @@ yclients-reviews-widget/
     ├── server.js              # Node.js прокси-сервер (PM2: barista-reviews)
     ├── kv-store.js            # SQLite KV-хранилище (события webhook)
     ├── public/widgets/
-    │   └── reviews.js         # Серверная версия виджета для Tilda
+    │   ├── reviews.js         # Маленький loader для Tilda
+    │   └── reviews.bundle.js  # Собранный код виджета
     ├── package.json           # Зависимости: express, better-sqlite3, cors, node-cron
     └── nginx-mbs-reviews.conf # Nginx location блоки для /reviews, /trainers
 ```
@@ -22,15 +23,11 @@ yclients-reviews-widget/
 ## Как устроено
 
 ```
-Tilda (tilda-embed.html)
-    ↓ loads /widgets/reviews.js
-Hosted widget JS
-    ↓ fetch /trainers, /reviews
-nginx (api.barista-school.ru)
-    ↓ proxy_pass port 3000
-Node.js server.js (PM2: barista-reviews)
-    ↓ SQLite snapshot, обновление по cron примерно раз в час
-YClients API (company 453962)
+Tilda (ровно один tilda-embed.html)
+    ↓ defer /widgets/reviews.js → async /widgets/reviews.bundle.js
+Hosted reviews widget
+    ├─ /reviews → nginx → Node.js → SQLite snapshot → YClients API
+    └─ /api/trainers.json + /api/advisors.json → актуальные публичные профили
 ```
 
 ## Инцидент 2026-06-08: сайт Tilda не догружал блоки
@@ -266,7 +263,9 @@ Feed не читать через nginx и не использовать как 
 - База данных: `/root/app/data/kv.db` (SQLite)
 - Переменные окружения: `/root/app/.env`
 
-> **Важно:** в Tilda больше не нужно вставлять полный `reviews-widget.html`. В Tilda вставляется короткий код из `tilda-embed.html`, а основной код виджета хранится и обновляется на сервере как `/widgets/reviews.js`.
+> **Важно:** в Tilda не вставляют полный `reviews-widget.html`. Допустим ровно
+> один короткий фрагмент из `tilda-embed.html`; `reviews.js` загружает
+> `reviews.bundle.js` асинхронно.
 
 ### Структура директорий на сервере
 
@@ -278,7 +277,8 @@ Feed не читать через nginx и не использовать как 
 ├── ecosystem.config.js
 ├── public/
 │   └── widgets/
-│       └── reviews.js  # JS-виджет для Tilda
+│       ├── reviews.js         # loader для Tilda
+│       └── reviews.bundle.js  # собранный виджет
 ├── data/
 │   └── kv.db          # SQLite (webhook-события)
 ├── logs/
@@ -309,14 +309,21 @@ const STAFF_MAP = {
 
 ## Деплой
 
-### Обновить сервер и hosted-виджет
+### Обновить hosted-виджет
 
-```bash
-node scripts/build-hosted-widget.js
-scp -i ~/.ssh/id_ed25519 server/server.js root@5.35.93.225:/root/app/server.js
-scp -i ~/.ssh/id_ed25519 server/public/widgets/reviews.js root@5.35.93.225:/root/app/public/widgets/reviews.js
-ssh -i ~/.ssh/id_ed25519 root@5.35.93.225 'pm2 restart barista-reviews'
-```
+1. Измените исходник `reviews-widget.html`. Если нужен новый cache-buster,
+   согласованно обновите версию в `scripts/build-hosted-widget.js` и
+   `tilda-embed.html`.
+2. Соберите два артефакта: `node scripts/build-hosted-widget.js`.
+3. Проверьте синтаксис loader и bundle, сохраните резервные копии обоих
+   production-файлов и сначала загрузите `reviews.bundle.js`, затем
+   `reviews.js`.
+4. Для изменения только hosted-файлов перезапуск PM2 не требуется. Он нужен
+   только вместе с изменениями backend.
+5. В Tilda замените блок целиком на актуальное содержимое
+   `tilda-embed.html`, убедитесь, что такой блок один, и опубликуйте страницу.
+6. Сверьте публичные loader и bundle с собранными файлами, затем проверьте
+   на главной странице ленту, селект и открытие профиля на desktop и mobile.
 
 ### Изменить private feed для Telegram
 
@@ -340,10 +347,11 @@ ssh -i ~/.ssh/id_ed25519 root@5.35.93.225 'pm2 restart barista-reviews'
 
 ```html
 <div id="mbs-reviews-widget" data-mbs-reviews-widget></div>
-<script defer src="https://api.barista-school.ru/widgets/reviews.js?v=20260619-1"></script>
+<script defer src="https://api.barista-school.ru/widgets/reviews.js?v=20260907-1"></script>
 ```
 
-После этого обычные изменения виджета делаются через `reviews-widget.html` → `node scripts/build-hosted-widget.js` → деплой файлов из `server/public/widgets/` на сервер. Tilda-код менять не нужно.
+Это текущая версия фрагмента; при следующем cache-buster копируйте код только
+из `tilda-embed.html`, а не редактируйте версию вручную в Tilda.
 
 `/widgets/reviews.js` — маленький неблокирующий loader для Tilda. Основной код виджета лежит в `/widgets/reviews.bundle.js` и грузится асинхронно, чтобы не останавливать загрузку остальных блоков страницы.
 
@@ -383,6 +391,9 @@ const ADVISORS_API_URL = 'https://api.barista-school.ru/api/advisors.json';
 Отзыв без соответствующей карточки не выводится — так в публичный блок не попадают бывшие сотрудники. Имя специалиста отображается кнопкой и открывает общий профиль из `trainer-profile-widget.js`; Tilda-якоря для персональных поп-апов больше не используются.
 
 Если один из каталогов кратковременно недоступен, виджет использует второй. Если недоступны оба, отзывы не показываются: это безопаснее, чем вернуть в ленту устаревшие профили.
+
+`STAFF_MAP` backend не определяет публичный состав специалистов: для ленты и
+селектора источником истины остаётся объединение двух публичных каталогов.
 
 ## Зависимости сервера
 
