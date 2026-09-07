@@ -6,7 +6,7 @@ const sourcePath = path.join(rootDir, 'reviews-widget.html');
 const outDir = path.join(rootDir, 'server', 'public', 'widgets');
 const loaderPath = path.join(outDir, 'reviews.js');
 const bundlePath = path.join(outDir, 'reviews.bundle.js');
-const widgetVersion = '20260619-1';
+const widgetVersion = '20260907-1';
 
 const source = fs.readFileSync(sourcePath, 'utf8');
 const scriptOpen = source.lastIndexOf('<script>');

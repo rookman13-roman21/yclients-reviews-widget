@@ -33,7 +33,7 @@
     if (!root.id) root.id = 'mbs-reviews-widget-' + Math.random().toString(36).slice(2);
 
     var bundle = document.createElement('script');
-    bundle.src = 'https://api.barista-school.ru/widgets/reviews.bundle.js?v=20260619-1';
+    bundle.src = 'https://api.barista-school.ru/widgets/reviews.bundle.js?v=20260907-1';
     bundle.async = true;
     bundle.setAttribute('data-target', '#' + root.id);
     var fallbackTimer = window.setTimeout(function() {
