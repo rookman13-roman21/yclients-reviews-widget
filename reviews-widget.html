@@ -16,9 +16,8 @@
 
   Ключевые константы (в начале <script>):
     WORKER_URL          — URL прокси
-    TRAINER_VISIBILITY  — какие тренеры видны в фильтре (1/0)
-    TRAINER_POPUPS      — якоря попапов тренеров в Tilda (#roman, #nikita…)
-    STAFF_FALLBACK      — имена тренеров если /trainers недоступен
+    TRAINERS_API_URL    — актуальные карточки тренеров MBS
+    TRAINER_PROFILE_WIDGET_URL — общий popup профиля тренера
 
   Безопасность: author/master экранируются через escapeHtml() → нет XSS.
 -->
@@ -139,11 +138,11 @@
   /* Расширенная кликабельная зона вокруг «читать дальше» (+5px со всех сторон) */
   .yc-read-more-wrap { display:inline-block; padding:5px; margin:-5px; border-radius:6px; cursor:pointer; z-index:20; position:relative; }
   .yc-read-more-wrap:hover .yc-read-more { color:#A51F36; text-decoration:underline; }
-    /* Trainer link styling */
+    /* Trainer profile button styling */
     .yc-master { color:#CC2841; }
-    .yc-master-link { color:#CC2841; text-decoration:underline; }
+    .yc-master-link { margin:0; padding:0; border:0; background:transparent; color:#CC2841; font:inherit; text-decoration:underline; cursor:pointer; }
     .yc-master-link:hover { color:#A51F36; }
-    .yc-master-link:visited, .yc-master-link:active { color:#CC2841; }
+    .yc-master-link:focus-visible { outline:2px solid #417033; outline-offset:2px; border-radius:2px; }
     /* Inline spinner for loading */
     .yc-inline-spinner { display:inline-block; width:14px; height:14px; border:2px solid #E9B9C2; border-top-color:#CC2841; border-radius:50%; animation:ycspin 0.9s linear infinite; vertical-align:middle; margin-left:6px; margin-top:-3px; }
     @keyframes ycspin { from { transform:rotate(0deg);} to { transform:rotate(360deg);} }
@@ -344,60 +343,18 @@
     // Глобальный кэш отзывов: ключ '' для «Все», остальные = id тренера
     // Структура: { initialLoaded, fullLoaded, initialItems[], fullItems[], loadingFull }
     const reviewsCache = {};
-    const TRAINERS_LOCAL_KEY = 'yc_trainers_v1';
     const REVIEWS_CACHE_KEY = 'yc_reviews_v3_snapshot'; // localStorage кэш отзывов
     const REVIEWS_CACHE_TTL = 30 * 60 * 1000; // 30 минут
-    // === Видимость тренеров ===
-    // 1 = показывать, 0 = скрыть. Если id отсутствует — показывается по умолчанию.
-    const TRAINER_VISIBILITY = {
-      '2730371': 0, // Александра
-      '3781544': 0, // Алина
-      '1322836': 1, // Анастасия Кадушкина
-      '2586628': 0, // Валерия
-      '2748512': 1, // Денис Храмов
-      '3257457': 0, // Ева Гуцу
-      '2350188': 0, // Иван Колпаков
-      '2164697': 0, // Максим Литвинов
-      '2151123': 0, // Марина Никифорова
-      '2694420': 0, // Милица Дементьева
-      '3866140': 1, // Никита
-      '3323198': 0, // Никита Бобачев
-      '3269178': 1, // Роман Лунгу
-      '3915755': 1, // Сабрина
-      '1322544': 0, // Суслин Роман
-      '4103142': 0, // Тренер 4103142 (имя пока неизвестно)
-      '4837950': 1, // Аркадий Скалин
-    };
-    // === Fallback-имена тренеров (если /trainers недоступен) ===
-    const STAFF_FALLBACK = {
-      '2730371': 'Александра',
-      '3781544': 'Алина',
-      '1322836': 'Анастасия Кадушкина',
-      '2586628': 'Валерия',
-      '2748512': 'Денис Ефремов',
-      '3257457': 'Ева Гуцу',
-      '2350188': 'Иван Колпаков',
-      '2164697': 'Максим Литвинов',
-      '2151123': 'Марина Никифорова',
-      '2694420': 'Милица Дементьева',
-      '3866140': 'Никита Баховский',
-      '3323198': 'Никита Бобачев',
-      '3269178': 'Роман Лунгу',
-      '3915755': 'Сабрина Темурова',
-      '1322544': 'Суслин Роман',
-      '4103142': 'Тренер 4103142',
-      '4837950': 'Аркадий Скалин',
-    };
-    // === Ссылки на попапы тренеров в Тильде (якоря) ===
-    const TRAINER_POPUPS = {
-      '2748512': '#denefrem',
-      '3269178': '#romba',
-      '3866140': '#nikita',
-      '3915755': '#sabrina',
-      '1322544': '#roman',
-      '1322836': '#nastiya',
-      '4837950': '#skalin',
-    };
+    // Показываем только специалистов, у которых есть актуальная карточка MBS.
+    // trainers.json содержит тренеров, advisors.json — Анастасию и Романа Суслина.
+    const TRAINERS_API_URL = 'https://api.barista-school.ru/api/trainers.json';
+    const ADVISORS_API_URL = 'https://api.barista-school.ru/api/advisors.json';
+    const TRAINER_PROFILE_WIDGET_URL = 'https://api.barista-school.ru/trainer-profile-widget.js';
+    const trainerProfilesById = {};
+    let trainerProfilesReady = false;
+    let trainerProfilesPromise = null;
+    let trainerProfileWidgetPromise = null;
+    let trainerProfileModal = null;
     // Fetch с таймаутом (AbortController) — защита от зависания на нестабильном соединении
     const FETCH_TIMEOUT_MS = 15000; // 15 секунд (страницы по 50KB должны укладываться)
     function fetchWithTimeout(url, options = {}, timeoutMs = FETCH_TIMEOUT_MS) {
@@ -418,100 +375,157 @@
 
     // Rating filter disabled - all reviews have 5 stars
 
-    function updateRenderedMasterNames(map){
-      try {
-        const items = document.querySelectorAll('#yc-list .yc-item');
-        items.forEach(el => {
-          const mid = el.getAttribute('data-master-id');
-          if (mid && map[mid]) {
-            const masterEl = el.querySelector('.yc-master');
-            if (masterEl) masterEl.textContent = map[mid];
-          }
-        });
-      } catch(e){ console.warn('updateRenderedMasterNames failed', e); }
+    function normalizeTrainerProfile(item) {
+      const id = String(item && (item.staff_id || item.id) || '');
+      if (!id || !item || !item.name) return null;
+      return {
+        id: id,
+        staff_id: id,
+        name: item.name,
+        position: item.position || 'Специалист MBS',
+        photo: item.photo || '',
+        bio: item.bio || '',
+        rating: Number(item.rating) || 0,
+        reviews_count: Number(item.reviews_count) || 0,
+        reviews: Array.isArray(item.reviews) ? item.reviews : []
+      };
     }
-    
-      // Скрыть тренеров, помеченных 0 в TRAINER_VISIBILITY (как из селекта, так и из карточек)
-      function applyTrainerVisibility(){
-        try {
-          // В персональном режиме (когда выбран конкретный тренер) НЕ скрываем его карточки, даже если стоит 0.
-          if (currentTrainer) return;
-          const disabledIds = Object.entries(TRAINER_VISIBILITY)
-            .filter(([id, v]) => Number(v) === 0)
-            .map(([id]) => String(id));
-          if (!disabledIds.length) return;
-          document.querySelectorAll('#yc-list .yc-item').forEach(el => {
-            const mid = el.getAttribute('data-master-id');
-            if (mid && disabledIds.includes(mid)) {
-              el.style.display = 'none';
-              el.classList.add('yc-hidden-trainer');
-            }
-          });
-          // Селект больше НЕ чистим, чтобы можно было выбрать скрытого тренера напрямую.
-        } catch(e){ console.warn('applyTrainerVisibility failed', e); }
-      }
 
-    async function loadTrainers(){
-      // Immediate UI: populate from localStorage (if present) or STAFF_FALLBACK
+    async function fetchTrainerProfiles(url) {
+      const response = await fetchWithTimeout(url, { headers: { 'Accept': 'application/json' } });
+      if (!response.ok) throw new Error(`trainer profiles status ${response.status}`);
+      const body = await response.json();
+      const list = Array.isArray(body) ? body : (body && (body.trainers || body.advisors || body.items)) || [];
+      return list.map(normalizeTrainerProfile).filter(Boolean);
+    }
+
+    function isVisibleTrainer(id) {
+      return !!trainerProfilesById[String(id || '')];
+    }
+
+    function populateTrainerSelect() {
+      const profiles = Object.keys(trainerProfilesById)
+        .map(id => trainerProfilesById[id])
+        .sort((a, b) => a.name.localeCompare(b.name, 'ru'));
+      if (currentTrainer && !isVisibleTrainer(currentTrainer)) {
+        currentTrainer = '';
+        localStorage.removeItem('yc_trainer');
+      }
+      trainerSelect.innerHTML = '<option value="">Все</option>' + profiles.map(profile =>
+        `<option value="${escapeHtml(profile.id)}">${escapeHtml(profile.name)}</option>`
+      ).join('');
+      trainerSelect.value = currentTrainer;
+      trainerSelect.disabled = false;
+    }
+
+    async function loadTrainers() {
+      if (trainerProfilesPromise) return trainerProfilesPromise;
+      trainerSelect.disabled = true;
+      trainerSelect.innerHTML = '<option value="">Загрузка тренеров…</option>';
+      trainerProfilesPromise = Promise.all([
+        fetchTrainerProfiles(TRAINERS_API_URL).catch(function (error) {
+          console.warn('Failed to load trainer profiles:', error);
+          return [];
+        }),
+        fetchTrainerProfiles(ADVISORS_API_URL).catch(function (error) {
+          console.warn('Failed to load advisor profiles:', error);
+          return [];
+        })
+      ]).then(function (sources) {
+        sources.flat().forEach(function (profile) {
+          trainerProfilesById[profile.id] = profile;
+        });
+        if (!Object.keys(trainerProfilesById).length) throw new Error('trainer profile catalog is empty');
+        trainerProfilesReady = true;
+        populateTrainerSelect();
+        return trainerProfilesById;
+      }).catch(function (error) {
+        trainerProfilesPromise = null;
+        trainerSelect.innerHTML = '<option value="">Тренеры временно недоступны</option>';
+        trainerSelect.disabled = true;
+        throw error;
+      });
+      return trainerProfilesPromise;
+    }
+
+    function loadTrainerProfileWidget() {
+      if (window.MBSTrainerProfileModal) return Promise.resolve(window.MBSTrainerProfileModal);
+      if (trainerProfileWidgetPromise) return trainerProfileWidgetPromise;
+      trainerProfileWidgetPromise = new Promise(function (resolve, reject) {
+        const existing = document.querySelector('script[data-mbs-trainer-profile-widget]');
+        if (existing) {
+          existing.addEventListener('load', function () { resolve(window.MBSTrainerProfileModal); }, { once: true });
+          existing.addEventListener('error', reject, { once: true });
+          return;
+        }
+        const script = document.createElement('script');
+        script.src = TRAINER_PROFILE_WIDGET_URL;
+        script.async = true;
+        script.setAttribute('data-mbs-trainer-profile-widget', '1');
+        script.onload = function () {
+          if (window.MBSTrainerProfileModal) resolve(window.MBSTrainerProfileModal);
+          else reject(new Error('trainer profile widget did not initialise'));
+        };
+        script.onerror = function () { reject(new Error('trainer profile widget failed to load')); };
+        document.head.appendChild(script);
+      }).catch(function (error) {
+        trainerProfileWidgetPromise = null;
+        throw error;
+      });
+      return trainerProfileWidgetPromise;
+    }
+
+    function openTrainerProfile(id, trigger) {
+      const profile = trainerProfilesById[String(id || '')];
+      if (!profile) return;
+      Promise.all([loadTrainerProfileWidget(), loadProfileReviews(profile)])
+        .then(function (result) {
+          const api = result[0];
+          trainerProfileModal = trainerProfileModal || api.create();
+          trainerProfileModal.open(profile, trigger);
+        })
+        .catch(function (error) { console.warn('Failed to open trainer profile:', error); });
+    }
+
+    listEl.addEventListener('click', function (event) {
+      const button = event.target.closest('[data-trainer-profile-id]');
+      if (!button) return;
+      event.preventDefault();
+      openTrainerProfile(button.getAttribute('data-trainer-profile-id'), button);
+    });
+
+    function profileReviewFromItem(item) {
+      const data = (item && item.body && item.body.data) ? item.body.data : {};
+      const compact = (item && item.compact) || {
+        text: data.text || data.message || '',
+        date: data.date || data.created_at || '',
+        rating: data.rating ?? data.rate ?? data.score ?? data.stars ?? data.mark ?? data.value ?? 0,
+        author_name: data.author_name || data.user_name || data.client_name || data.author || ''
+      };
+      return {
+        author: extractFirstName(compact.author_name || 'Аноним'),
+        date: compact.date || '',
+        rating: Number(compact.rating) || 0,
+        text: normalizeText(compact.text || '')
+      };
+    }
+
+    async function loadProfileReviews(profile) {
+      if (!profile || profile._mbsReviewsLoaded) return profile;
+      profile._mbsReviewsLoaded = true;
+      if (Array.isArray(profile.reviews) && profile.reviews.length) return profile;
       try {
-        let initialList = null;
-        try {
-          const raw = localStorage.getItem(TRAINERS_LOCAL_KEY);
-          if (raw) {
-            const parsed = JSON.parse(raw);
-            if (Array.isArray(parsed) && parsed.length) initialList = parsed;
-          }
-        } catch (e) {
-          console.warn('Failed to read trainers from localStorage', e);
-        }
-        if (!initialList) {
-          initialList = Object.keys(STAFF_FALLBACK).map(id => ({ id, name: STAFF_FALLBACK[id], count: 0 }));
-        }
-    trainerSelect.innerHTML = '<option value="">Все</option>' + initialList.map(t => `<option value="${escapeHtml(String(t.id))}" ${String(t.id)===String(currentTrainer)?'selected':''}>${escapeHtml(t.name)}</option>`).join('');
-    trainerSelect.value = currentTrainer || '';
-    trainerSelect.disabled = false; // make control usable immediately
-
-        // Now fetch fresh trainers in background and update when available
-        const headers = { 'Accept': 'application/json' };
-        const base = WORKER_URL.replace(/\/+$/, '');
-        // Одна попытка без ретраев (экономим время на медленном ISP)
-        const resp = await fetchWithTimeout(`${base}/trainers?include_zero=1`, { headers });
-        if (!resp.ok) throw new Error(`trainers status ${resp.status}`);
-        const body = await resp.json();
-    const list = (body && body.trainers) ? body.trainers : [];
-    let finalList = list && list.length ? list : Object.keys(STAFF_FALLBACK).map(id => ({ id, name: STAFF_FALLBACK[id], count: 0 }));
-    // Переопределить имена из STAFF_FALLBACK для consistency
-    finalList = finalList.map(t => ({ ...t, name: STAFF_FALLBACK[String(t.id)] || t.name }));
-    // Карта id -> имя для актуализации уже отрисованных карточек
-    const trainerMap = finalList.reduce((acc, t) => { acc[String(t.id)] = t.name; return acc; }, {});
-        // Apply static per-file visibility (if configured)
-        try {
-          const hasStatic = Object.keys(TRAINER_VISIBILITY || {}).length > 0;
-          if (hasStatic) {
-            finalList = finalList.filter(t => {
-              const v = TRAINER_VISIBILITY[String(t.id)];
-              if (typeof v === 'number') return Number(v) === 1;
-              return true;
-            });
-          }
-        } catch (e) {
-          console.warn('TRAINER_VISIBILITY parse error', e);
-        }
-        // persist for next loads
-        try { localStorage.setItem(TRAINERS_LOCAL_KEY, JSON.stringify(finalList)); } catch(e){/* ignore */}
-    // populate select with fresh list
-      trainerSelect.innerHTML = '<option value="">Все</option>' + finalList.map(t => `<option value="${escapeHtml(String(t.id))}" ${String(t.id)===String(currentTrainer)?'selected':''}>${escapeHtml(t.name)}</option>`).join('');
-      trainerSelect.value = currentTrainer || '';
-      // Обновить уже показанные карточки отзывов именами из /trainers (если были placeholders)
-      updateRenderedMasterNames(trainerMap);
-    // Применить скрытие по TRAINER_VISIBILITY
-    applyTrainerVisibility();
-        // Не предзагружаем отзывы всех тренеров: это забивает общий API-домен и мешает расписаниям.
-      } catch (e) {
-        console.warn('Failed to load trainers:', e && e.message ? e.message : e);
-        // keep initial fallback (already set) and make control usable
-        trainerSelect.disabled = false;
+        const body = await fetchPageFromServer(20, 1, profile.staff_id, 0, { full: true });
+        const reviews = (body && Array.isArray(body.items) ? body.items : [])
+          .map(profileReviewFromItem)
+          .filter(review => review.text);
+        profile.reviews = reviews;
+        profile.reviews_count = Math.max(Number(profile.reviews_count) || 0, Number(body && body.total) || reviews.length);
+      } catch (error) {
+        profile._mbsReviewsLoaded = false;
+        console.warn('Failed to load profile reviews:', error);
       }
+      return profile;
     }
 
     function generateAvatar(firstLetter) {
@@ -650,32 +664,6 @@
       } catch(_) { return false; }
     }
 
-    // Helpers to fetch from /reviews with fallback to /events
-    function enrichItemsWithFallback(items){
-      try {
-        return items.map(it => {
-          try {
-            const data = (it.body && it.body.data) ? it.body.data : (it.body?.event?.data || {});
-            const mid = data.master_id || data.staff_id || (it.compact && (it.compact.master_id || it.compact.staff_id));
-            // Определяем имя тренера: сначала из данных, затем из compact, затем из fallback
-            let mname = data.master_name || (it.compact && it.compact.master_name) || '';
-            if (mid && STAFF_FALLBACK[String(mid)]) {
-              mname = STAFF_FALLBACK[String(mid)];
-            }
-            // Присваиваем обратно, чтобы downstream логика видела имя
-            if (mname) {
-              if (it.body && it.body.data) it.body.data.master_name = mname;
-              if (it.compact) {
-                it.compact.master_name = mname;
-                if (mid && !it.compact.master_id) it.compact.master_id = mid;
-              }
-            }
-          } catch(_){}
-          return it;
-        });
-      } catch(e){ return items; }
-    }
-
     async function fetchPageFromServer(count, page, trainerId = '', rating = 0, options = {}) {
       console.log('Fetching reviews:', { count, page, trainerId, rating, full: !!options.full });
       const headers = { 'Accept': 'application/json' };
@@ -690,7 +678,6 @@
         if (!resp.ok) throw new Error(`reviews status ${resp.status}`);
         const json = await resp.json();
         console.log('Fetched reviews:', json.items ? json.items.length : 0, 'page', page);
-        if (json && Array.isArray(json.items)) json.items = enrichItemsWithFallback(json.items);
         return json;
       } catch (err) {
         console.warn('fetchPageFromServer failed:', err.message, {count, page});
@@ -933,11 +920,10 @@
 
     // Render the accumulated buffer into the slider
     function renderBuffer(forceRerender = false){
-      // Построим множества видимых и скрытых тренеров на основе TRAINER_VISIBILITY
-      const visEntries = Object.entries(TRAINER_VISIBILITY || {});
-      const VISIBLE_IDS = new Set(visEntries.filter(([id, v]) => Number(v) === 1).map(([id]) => String(id)));
-      const HIDDEN_IDS = new Set(visEntries.filter(([id, v]) => Number(v) === 0).map(([id]) => String(id)));
-      const isAll = !currentTrainer; // выбор «Все»
+      if (!trainerProfilesReady) {
+        listEl.innerHTML = '<div class="yc-empty">Загружаем тренеров…</div>';
+        return;
+      }
 
       const filteredItems = (itemsBuffer || []).filter(it => {
         const data = (it.body && it.body.data) ? it.body.data : {};
@@ -952,29 +938,15 @@
         };
         const text = (c.text || '').trim();
         const words = (text || '').split(/\s+/).filter(w => w.length > 0);
-          if (words.length < 4) return false;
+        if (words.length < 4) return false;
 
-          const mid = String(c.master_id || '');
-          const mname = String(c.master_name || '').trim();
+        const mid = String(c.master_id || '');
 
-    // Абсолютное правило: тренеры с 0 не показываются в режиме «Все», но при индивидуальном выборе разрешаем (чтобы не терять отзывы)
-    if (isAll && mid && HIDDEN_IDS.has(mid)) return false;
+        // Отзывы видны только для специалистов с текущей публичной карточкой MBS.
+        // Это исключает бывших сотрудников и не даёт открыть устаревший Tilda-popup.
+        if (!isVisibleTrainer(mid)) return false;
 
-    // Требуем имя тренера (fallback уже пытается заполнить). Если вдруг нет — скрываем.
-    if (!mname) return false;
-
-          // Логика «Все»: показываем только тренеров с 1
-          if (isAll) {
-            // если master_id отсутствует или не отмечен как 1 — не показываем
-            if (!mid) return false;
-            if (VISIBLE_IDS.size > 0 && !VISIBLE_IDS.has(mid)) return false;
-            return true;
-          }
-
-      // Логика персонального фильтра: показываем выбранного тренера независимо от его статуса в карте видимости
-      if (mid !== String(currentTrainer)) return false;
-      // Белый список не ограничивает персональный выбор (если пользователь смог выбрать тренера — показать его отзывы)
-          return true;
+        return !currentTrainer || mid === String(currentTrainer);
       });
 
       // Remove duplicates based on review ID
@@ -1086,8 +1058,6 @@
         } catch(_) { /* ignore */ }
         lastRenderedCount = uniqueItems.length;
       }
-        // После рендера применить скрытие (если изменилось состояние)
-        applyTrainerVisibility();
         // Обновить счётчик позиции после изменений DOM
         try { if (window.__yclients_widget && typeof window.__yclients_widget._updateCounter === 'function') window.__yclients_widget._updateCounter(); } catch(_){}
         // Show loading indicator at end if still loading full
@@ -1113,15 +1083,6 @@
         } catch(_){}
       // If we have less than totalAvailable loaded, show a subtle loader at end (or automatic fetch on scroll handled by initSlider)
     }
-
-    // load trainers on init
-    loadTrainers().then(() => {
-      // ensure selection reflects localStorage
-      if (currentTrainer) {
-        const opt = trainerSelect.querySelector(`option[value="${currentTrainer}"]`);
-        if (opt) opt.selected = true;
-      }
-    });
 
     function renderStars(n) {
       if (n === null || typeof n === 'undefined') return '';
@@ -1168,6 +1129,9 @@
         }
       }
       if (!master && c.master_name) master = c.master_name;
+      const midStr = String(c.master_id || data.master_id || data.staff_id || '');
+      const trainerProfile = trainerProfilesById[midStr] || null;
+      if (trainerProfile) master = trainerProfile.name;
 
       // Handle rating
       let rating = c.rating;
@@ -1204,12 +1168,10 @@
   textHtml = `<div class="yc-text">${escapeHtml(text)}</div>`;
       }
 
-      const midStr = String(c.master_id || '');
       const authorHtml = author ? escapeHtml(author) : '';
       let masterHtml = '';
       if (master) {
-        const href = TRAINER_POPUPS[midStr];
-        if (href) masterHtml = ' о тренере: <a class="yc-master yc-master-link" href="' + href + '">' + escapeHtml(master) + '</a>';
+        if (trainerProfile) masterHtml = ' о тренере: <button class="yc-master yc-master-link" type="button" data-trainer-profile-id="' + escapeHtml(midStr) + '" aria-label="Открыть профиль: ' + escapeHtml(master) + '">' + escapeHtml(master) + '</button>';
         else masterHtml = ' о тренере: <span class="yc-master">' + escapeHtml(master) + '</span>';
       }
 
@@ -1518,15 +1480,17 @@
       } catch (e) { console.warn('initSlider failed', e); }
     }
 
-    // initial
-    loadInitial();
-    window.__yclients_widget = { 
-      refresh: () => loadInitial(), 
+    // Сначала получаем карточки специалистов: без них не показываем отзывы и не
+    // даём ссылке уйти в устаревший popup Tilda.
+    loadTrainers()
+      .then(() => loadInitial())
+      .catch(() => {
+        listEl.innerHTML = '<div class="yc-empty">Не удалось загрузить список тренеров. Обновите страницу.</div>';
+      });
+    window.__yclients_widget = {
+      refresh: () => loadInitial(),
       loadMore: () => loadMore(),
         goToPage: (p) => { itemsBuffer = []; exhausted = false; loadInitial(Number(p) || 1); },
-        hideTrainer: (id) => { try { TRAINER_VISIBILITY[String(id)] = 0; applyTrainerVisibility(); } catch(e){} },
-        showTrainer: (id) => { try { TRAINER_VISIBILITY[String(id)] = 1; // перерисовать селект и список
-            loadTrainers(); renderBuffer(); } catch(e){} },
       toggleReviewByKey: (key) => {
         const curEl = getTextContainerByKey(key);
         if (!curEl) return;
