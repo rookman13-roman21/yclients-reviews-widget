@@ -22,7 +22,7 @@ const {
 // ─── Config ──────────────────────────────────────────────────────────────────
 
 const PORT = process.env.PORT || 3000;
-const YCLIENTS_API_BASE = 'https://api.yclients.com';
+const YCLIENTS_API_BASE = 'https://api.yclients.ru';
 const DEFAULT_TTL = 300;
 const REVIEWS_SNAPSHOT_KEY = 'reviews:snapshot:v1';
 const REVIEWS_SNAPSHOT_SCHEMA = 2;
