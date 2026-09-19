@@ -15,3 +15,7 @@
 - **Откат:** автоматического отката нет; вручную поставить предыдущие проверенные loader/bundle и при необходимости вернуть cache-buster Tilda.
 - **Соседние системы:** YClients API, Tilda.
 - **Главная дока:** `README.md`.
+
+## API-cutover yClients .ru — пакет 4042 (19.09.2026)
+
+API-константа переводится на api.yclients.ru. Выпуск server/server.js в /root/app/server.js после backup и restart PM2 barista-reviews. Private feed и SQLite сохраняются. Проверка: comments GET, публичный snapshot и штатный cron, агрегаты TLS/429. Откат предыдущего server.js и restart того же PM2. Russian Trusted Root CA — отдельный этап; этот пакет не меняет trust. Фактический статус выкладки фиксируется в задаче 4042 и workspace release manifest.
