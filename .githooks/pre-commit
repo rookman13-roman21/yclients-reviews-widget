@@ -5,7 +5,9 @@
 set -euo pipefail
 
 ROOT="$(git rev-parse --show-toplevel)"
-MAIN_ROOT="$(git worktree list --porcelain | awk '/^worktree / { print substr($0, 10); exit }')"
+# awk читает вывод до конца: ранний выход дал бы git SIGPIPE, и при pipefail хук падал молча.
+MAIN_ROOT="$(git worktree list --porcelain | awk '/^worktree / && !seen++ { print substr($0, 10) }')" \
+  || { echo "ERROR: pre-commit: не удалось прочитать список worktree" >&2; exit 1; }
 
 if [ -z "$MAIN_ROOT" ]; then
   MAIN_ROOT="$ROOT"
