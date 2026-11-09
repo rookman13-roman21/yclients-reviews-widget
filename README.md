@@ -74,7 +74,9 @@ YClients API (company 453962)
 
 ## Мониторинг доступности сайта
 
-С 02.10.2026 отдельно работает независимый монитор на `mbs-web`: он читает
+> Монитор `mbs-site-monitor` жил на `mbs-web` (`159.194.233.13`, Beget): не работает с 02.11.2026, на Timeweb не перенесено (сверено 09.11). Описание ниже — как он работал до 02.11.
+
+С 02.10.2026 отдельно работал независимый монитор на `mbs-web`: он читает
 публичный `/reviews?limit=1` каждые пять минут и проверяет другие виджеты
 сайта. После трёх неудачных проверок подряд бот сообщает в чат «Ошибки кода»;
 успешные проходы сообщений не создают. Два внешних heartbeat Better Stack
@@ -268,7 +270,9 @@ Feed не читать через nginx и не использовать как 
 `bitrix-tools/docs/feedback-review-digest-runbook.md` и проверить, что
 невалидный либо устаревший snapshot не двигает журнал доставленных ID.
 
-## Сервер: root@5.35.93.225
+## Сервер: root@<mbs-main-tw>
+
+`mbs-main-tw`, Timeweb (до 02.11 — `root@5.35.93.225`, Beget). Путь `/root/app` и PM2 `barista-reviews` на `mbs-main-tw` сверены 09.11; остальные пункты ниже на Timeweb не сверены.
 
 - Путь: `/root/app/`
 - PM2: `pm2 show barista-reviews`
@@ -322,10 +326,11 @@ const STAFF_MAP = {
 ### Обновить сервер и hosted-виджет
 
 ```bash
+# до 02.11 — root@5.35.93.225, Beget
 node scripts/build-hosted-widget.js
-scp -i ~/.ssh/id_ed25519 server/server.js root@5.35.93.225:/root/app/server.js
-scp -i ~/.ssh/id_ed25519 server/public/widgets/reviews.js root@5.35.93.225:/root/app/public/widgets/reviews.js
-ssh -i ~/.ssh/id_ed25519 root@5.35.93.225 'pm2 restart barista-reviews'
+scp -i ~/.ssh/id_ed25519 server/server.js root@<mbs-main-tw>:/root/app/server.js
+scp -i ~/.ssh/id_ed25519 server/public/widgets/reviews.js root@<mbs-main-tw>:/root/app/public/widgets/reviews.js
+ssh -i ~/.ssh/id_ed25519 root@<mbs-main-tw> 'pm2 restart barista-reviews'
 ```
 
 ### Изменить private feed для Telegram
@@ -360,8 +365,9 @@ ssh -i ~/.ssh/id_ed25519 root@5.35.93.225 'pm2 restart barista-reviews'
 ### Обновить nginx (если менялся mbs-reviews.conf)
 
 ```bash
-scp -i ~/.ssh/id_ed25519 server/nginx-mbs-reviews.conf root@5.35.93.225:/etc/nginx/snippets/mbs-reviews.conf
-ssh -i ~/.ssh/id_ed25519 root@5.35.93.225 'nginx -t && systemctl reload nginx'
+# до 02.11 — root@5.35.93.225, Beget; путь snippet на Timeweb не сверен
+scp -i ~/.ssh/id_ed25519 server/nginx-mbs-reviews.conf root@<mbs-main-tw>:/etc/nginx/snippets/mbs-reviews.conf
+ssh -i ~/.ssh/id_ed25519 root@<mbs-main-tw> 'nginx -t && systemctl reload nginx'
 ```
 
 ## Виджет (reviews-widget.html)
@@ -410,7 +416,8 @@ const ADVISORS_API_URL = 'https://api.barista-school.ru/api/advisors.json';
 ### Обновление зависимостей на сервере
 
 ```bash
-ssh -i ~/.ssh/id_ed25519 root@5.35.93.225
+# до 02.11 — root@5.35.93.225, Beget
+ssh -i ~/.ssh/id_ed25519 root@<mbs-main-tw>
 cd /root/app
 npm install
 pm2 restart barista-reviews
