@@ -18,6 +18,7 @@ const {
   reviewClientId,
   reviewPhone
 } = require('./review-visit-enrichment');
+const { createReviewsLimiter, createYclientsFetch, isLimiterRefusal } = require('./yclients-fetch');
 
 // ─── Config ──────────────────────────────────────────────────────────────────
 
@@ -171,6 +172,7 @@ function extractFirstName(raw) {
 let __staffCache = { ts: 0, map: {} };
 let __nameOvCache = { ts: 0, map: {} };
 let __reviewsSnapshotRefreshPromise = null;
+let __reviewsSnapshotRefreshId = null;
 const __siteHealthRate = new Map();
 const __siteHealthRunning = {
   core: false,
@@ -629,17 +631,38 @@ function getSiteHealthMonitorScript() {
 `;
 }
 
-function yclientsFetch(url, opts = {}) {
-  const headers = {
-    'Accept': 'application/vnd.yclients.v2+json',
-    'Content-Type': 'application/json',
-    'Authorization': `Bearer ${YCLIENTS_PARTNER_TOKEN}` + (YCLIENTS_USER_TOKEN ? `, User ${YCLIENTS_USER_TOKEN}` : ''),
-    ...opts.headers
-  };
-  const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), opts.timeout || 30000);
-  return fetch(url, { method: opts.method || 'GET', headers, signal: controller.signal })
-    .finally(() => clearTimeout(timeout));
+// Every yClients HTTP request goes through the shared rate limiter
+// (source=reviews.snapshot, priority=background, mode=required). A refused
+// lease throws before the request is sent; see yclients-fetch.js.
+const yclientsLimiter = createReviewsLimiter(process.env);
+const yclientsFetch = createYclientsFetch({
+  limiter: yclientsLimiter,
+  authorization: () => `Bearer ${YCLIENTS_PARTNER_TOKEN}` + (YCLIENTS_USER_TOKEN ? `, User ${YCLIENTS_USER_TOKEN}` : '')
+});
+
+// Tries the candidate staff endpoints in order and returns the first list.
+// Stops at once when the limiter refuses a lease or yClients answers 429:
+// the remaining paths must not be requested during a rate limit.
+async function fetchYclientsStaffList(candidatePaths) {
+  let urlTried = null;
+  for (const p of candidatePaths) {
+    const target = `${YCLIENTS_API_BASE}${p}`;
+    urlTried = target;
+    try {
+      const r = await yclientsFetch(target, { timeout: 10000 });
+      if (r.status === 429) break;
+      if (!r.ok) continue;
+      let parsed;
+      try { parsed = JSON.parse(await r.text()); } catch (_) { continue; }
+      if (Array.isArray(parsed)) return { found: parsed, urlTried };
+      if (Array.isArray(parsed.data)) return { found: parsed.data, urlTried };
+      if (Array.isArray(parsed.staff)) return { found: parsed.staff, urlTried };
+      if (Array.isArray(parsed.items)) return { found: parsed.items, urlTried };
+    } catch (e) {
+      if (isLimiterRefusal(e)) break;
+    }
+  }
+  return { found: null, urlTried };
 }
 
 
@@ -818,7 +841,19 @@ async function saveReviewsSnapshot(snapshot) {
   cachePut(REVIEWS_SNAPSHOT_KEY, snapshot, REVIEWS_PUBLIC_CACHE_TTL);
 }
 
-async function refreshReviewsSnapshot({ force = false } = {}) {
+let __reviewsRefreshSeq = 0;
+
+// Short machine-readable reason for the log: no response bodies, no URLs.
+function refreshErrorCode(error) {
+  if (isLimiterRefusal(error)) return 'limiter_' + error.code;
+  if (error && error.name === 'AbortError') return 'yclients_no_response';
+  const status = /status (\d{3})/.exec(String(error && error.message));
+  if (status) return 'yclients_status_' + status[1];
+  if (/invalid JSON/.test(String(error && error.message))) return 'yclients_invalid_json';
+  return 'error_' + String((error && error.name) || 'Error');
+}
+
+async function refreshReviewsSnapshot({ force = false, trigger = 'route' } = {}) {
   const current = await loadReviewsSnapshot();
   const age = current && current.ts ? Date.now() - Number(current.ts) : Infinity;
   const schemaIsCurrent = current && current.schema_version === REVIEWS_SNAPSHOT_SCHEMA;
@@ -831,10 +866,40 @@ async function refreshReviewsSnapshot({ force = false } = {}) {
     throw new Error('YCLIENTS_PARTNER_TOKEN not configured');
   }
 
+  // A failed refresh (limiter refusal, yClients 429 or any other error) never
+  // replaces the stored snapshot. Non-forced callers keep serving the previous
+  // one; forced callers (cron, admin refresh=1) still see the error.
+  const keepPrevious = (error) => {
+    if (force || !current) throw error;
+    console.error('[reviews] Snapshot refresh failed, serving previous snapshot:', error && error.message);
+    return { snapshot: current, refreshed: false, reason: 'refresh_failed_stale' };
+  };
+
   if (__reviewsSnapshotRefreshPromise) {
-    const snapshot = await __reviewsSnapshotRefreshPromise;
-    return { snapshot, refreshed: false, reason: 'refresh_in_progress' };
+    const joinedRefreshId = __reviewsSnapshotRefreshId;
+    try {
+      const snapshot = await __reviewsSnapshotRefreshPromise;
+      return { snapshot, refreshed: false, reason: 'refresh_in_progress', refreshId: joinedRefreshId };
+    } catch (error) {
+      return keepPrevious(error);
+    }
   }
+
+  // Every real refresh attempt writes a start line and exactly one finish line
+  // with the same id, so attempts and their outcomes can be counted from the log.
+  const refreshStartedAt = Date.now();
+  const refreshId = refreshStartedAt.toString(36) + '-' + (++__reviewsRefreshSeq);
+  __reviewsSnapshotRefreshId = refreshId;
+  let pagesLoaded = 0;
+  let requestsSent = 0;
+  let slowestYclientsMs = 0;
+  let slowestLeaseWaitMs = 0;
+  const finishLine = (result, extra) => '[reviews] Refresh finished: id=' + refreshId + ', result=' + result + extra
+    + ', pages=' + pagesLoaded + ', requests=' + requestsSent
+    + ', slowest_yclients_ms=' + slowestYclientsMs + ', slowest_lease_wait_ms=' + slowestLeaseWaitMs
+    + ', duration_ms=' + (Date.now() - refreshStartedAt);
+  console.log('[reviews] Refresh started: id=' + refreshId + ', at=' + new Date(refreshStartedAt).toISOString()
+    + ', trigger=' + trigger + ', force=' + (force ? 1 : 0));
 
   __reviewsSnapshotRefreshPromise = (async () => {
     const staffMap = await getStaffMapCached();
@@ -842,14 +907,21 @@ async function refreshReviewsSnapshot({ force = false } = {}) {
     const items = [];
     const internalFeedItems = [];
     let page = 1;
-    let pagesLoaded = 0;
 
     while (pagesLoaded < REVIEWS_SNAPSHOT_MAX_PAGES) {
       const target = new URL(YCLIENTS_API_BASE + '/api/v1/comments/' + encodeURIComponent(YCLIENTS_COMPANY_ID) + '/');
       target.searchParams.set('page', String(page));
       target.searchParams.set('count', String(REVIEWS_SNAPSHOT_PAGE_SIZE));
 
-      const resp = await yclientsFetch(target.toString(), { timeout: 20000 });
+      const resp = await yclientsFetch(target.toString(), {
+        timeout: 20000,
+        onTiming: ({ leaseWaitMs, requestMs }) => {
+          // Called for every request that was sent, including failed and aborted ones.
+          requestsSent++;
+          slowestYclientsMs = Math.max(slowestYclientsMs, requestMs);
+          slowestLeaseWaitMs = Math.max(slowestLeaseWaitMs, leaseWaitMs);
+        }
+      });
       if (!resp.ok) {
         const txt = await resp.text().catch(() => '');
         throw new Error('YClients comments status ' + resp.status + ': ' + txt.slice(0, 200));
@@ -896,13 +968,21 @@ async function refreshReviewsSnapshot({ force = false } = {}) {
       }
     }
     await KV.put('reviews:snapshot:last_refresh', String(snapshot.ts));
-    console.log('[reviews] Snapshot refreshed: ' + items.length + ' reviews, pages=' + pagesLoaded);
+    // slowest_yclients_ms: from sending the request to yClients until its response.
+    // slowest_lease_wait_ms: time spent waiting for the limiter lease, counted separately.
+    console.log('[reviews] Snapshot refreshed: ' + items.length + ' reviews, pages=' + pagesLoaded
+      + ', slowest_yclients_ms=' + slowestYclientsMs + ', slowest_lease_wait_ms=' + slowestLeaseWaitMs);
     return snapshot;
   })();
 
   try {
     const snapshot = await __reviewsSnapshotRefreshPromise;
-    return { snapshot, refreshed: true, reason: 'updated' };
+    console.log(finishLine('ok', ', reviews=' + snapshot.count));
+    return { snapshot, refreshed: true, reason: 'updated', refreshId };
+  } catch (error) {
+    console.error(finishLine('failed', ', error=' + refreshErrorCode(error)));
+    if (error && typeof error === 'object') error.refreshId = refreshId;
+    return keepPrevious(error);
   } finally {
     __reviewsSnapshotRefreshPromise = null;
   }
@@ -1539,21 +1619,7 @@ app.post('/admin/refresh-staff', async (req, res) => {
     `/api/v1/staff?company_id=${encodeURIComponent(YCLIENTS_COMPANY_ID)}`
   ];
 
-  let found = null, urlTried = null;
-  for (const p of candidatePaths) {
-    const target = `${YCLIENTS_API_BASE}${p}`;
-    urlTried = target;
-    try {
-      const r = await yclientsFetch(target, { timeout: 10000 });
-      if (!r.ok) continue;
-      let parsed;
-      try { parsed = JSON.parse(await r.text()); } catch (_) { continue; }
-      if (Array.isArray(parsed)) { found = parsed; break; }
-      if (Array.isArray(parsed.data)) { found = parsed.data; break; }
-      if (Array.isArray(parsed.staff)) { found = parsed.staff; break; }
-      if (Array.isArray(parsed.items)) { found = parsed.items; break; }
-    } catch (_) {}
-  }
+  const { found, urlTried } = await fetchYclientsStaffList(candidatePaths);
 
   if (!found) return res.status(502).json({ error: 'staff_list_not_found', tried: urlTried });
 
@@ -1696,19 +1762,7 @@ async function cronRefreshStaff() {
       `/api/v1/employees/${encodeURIComponent(YCLIENTS_COMPANY_ID)}/`
     ];
 
-    let found = null;
-    for (const p of candidatePaths) {
-      try {
-        const r = await yclientsFetch(`${YCLIENTS_API_BASE}${p}`, { timeout: 10000 });
-        if (!r.ok) continue;
-        let parsed;
-        try { parsed = JSON.parse(await r.text()); } catch (_) { continue; }
-        if (Array.isArray(parsed)) { found = parsed; break; }
-        if (Array.isArray(parsed.data)) { found = parsed.data; break; }
-        if (Array.isArray(parsed.staff)) { found = parsed.staff; break; }
-        if (Array.isArray(parsed.items)) { found = parsed.items; break; }
-      } catch (_) {}
-    }
+    const { found } = await fetchYclientsStaffList(candidatePaths);
 
     if (!found) return;
     const map = {};
@@ -1734,9 +1788,28 @@ async function cronRefreshStaff() {
 
 async function cronRefreshReviewsSnapshot() {
   try {
-    await refreshReviewsSnapshot();
+    await refreshReviewsSnapshot({ trigger: 'cron-6h' });
   } catch (e) {
     console.error('[cron] Reviews snapshot refresh error:', e.message);
+  }
+}
+
+// One planned run of the snapshot cron. Writes a start line with a timestamp
+// and one finish line that names the refresh attempt it used, so each of the
+// planned runs in a day can be matched with its outcome in the PM2 log.
+async function runScheduledReviewsRefresh() {
+  const startedAt = new Date().toISOString();
+  console.log('[cron] Reviews snapshot run started: at=' + startedAt);
+  try {
+    const outcome = await refreshReviewsSnapshot({ force: true, trigger: 'cron-snapshot' });
+    console.log('[cron] Reviews snapshot run finished: started_at=' + startedAt
+      + ', result=' + outcome.reason + ', refresh_id=' + (outcome.refreshId || 'none'));
+    return outcome;
+  } catch (e) {
+    console.error('[cron] Reviews snapshot run finished: started_at=' + startedAt
+      + ', result=failed, refresh_id=' + ((e && e.refreshId) || 'none'));
+    console.error('[cron] Reviews daily snapshot refresh error:', e.message);
+    return null;
   }
 }
 
@@ -1909,11 +1982,7 @@ if (!DISABLE_CRON) {
   // Regular forced refresh. Visitors always read the snapshot, not YClients directly.
   cron.schedule(REVIEWS_SNAPSHOT_CRON, async () => {
     console.log('[cron] Refreshing reviews snapshot...');
-    try {
-      await refreshReviewsSnapshot({ force: true });
-    } catch (e) {
-      console.error('[cron] Reviews daily snapshot refresh error:', e.message);
-    }
+    await runScheduledReviewsRefresh();
   });
 
   cron.schedule(SITE_HEALTH_CHECK_INTERVAL, async () => {
@@ -1932,7 +2001,7 @@ if (!DISABLE_CRON) {
     }
   });
 
-  refreshReviewsSnapshot().catch(e => console.error('[startup] Reviews snapshot warmup failed:', e.message));
+  refreshReviewsSnapshot({ trigger: 'startup' }).catch(e => console.error('[startup] Reviews snapshot warmup failed:', e.message));
   cronSiteHealthChecks().catch(e => console.error('[startup] Site health checks failed:', e.message));
   console.log('[cron] Scheduled tasks enabled (staff every 6 hours, reviews daily, site health core every minute, services every 15 minutes)');
 }
@@ -1943,6 +2012,7 @@ app.listen(PORT, '0.0.0.0', () => {
   console.log(`[server] Barista Reviews Proxy running on port ${PORT}`);
   console.log(`[server] Admin key: ${ADMIN_KEY ? 'configured' : 'NOT SET (admin endpoints disabled)'}`);
   console.log(`[server] Yclients: partner=${YCLIENTS_PARTNER_TOKEN ? 'configured' : 'NOT SET'}, company=${YCLIENTS_COMPANY_ID}`);
+  console.log(`[server] Yclients limiter: ${yclientsLimiter.endpoint && yclientsLimiter.secret ? 'configured' : 'NOT SET (yClients requests will not be sent)'}, source=${yclientsLimiter.source}, mode=${yclientsLimiter.mode}`);
 });
 
 // Graceful shutdown

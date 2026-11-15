@@ -333,6 +333,50 @@ scp -i ~/.ssh/id_ed25519 server/public/widgets/reviews.js root@<mbs-main-tw>:/ro
 ssh -i ~/.ssh/id_ed25519 root@<mbs-main-tw> 'pm2 restart barista-reviews'
 ```
 
+### Общий лимитер yClients (пакет 0810)
+
+Сервис ходит в API yClients только через `yclientsFetch` из
+`server/yclients-fetch.js`. Перед каждым HTTP-запросом, включая каждую страницу
+пагинации, он берёт разрешение (lease) у общего лимитера YClients-Dashboard:
+`source=reviews.snapshot`, приоритет `background`, режим всегда `required`
+(значение `YCLIENTS_LIMITER_MODE` из `.env` его не ослабляет).
+
+- Лимитер отказал, не ответил или не настроен: запрос в yClients не уходит,
+  `report` не шлётся, в логе строка `[yclients] Request not sent: limiter refused lease (...)`.
+- yClients ответил 429: по этому lease уходит `report` о rate limit.
+- Ответа yClients сервис ждёт только до момента «срок lease минус 3 секунды
+  на `report`», то есть не дольше 12 секунд: `report` о 429 по истёкшему lease
+  лимитер не принимает. Срок берётся из ответа лимитера (`expires_at_ms`).
+  Если lease пришёл слишком поздно, запрос не отправляется (`lease_expiring`).
+- Строка `[reviews] Snapshot refreshed: …, slowest_yclients_ms=N, slowest_lease_wait_ms=M`
+  в логе PM2: `slowest_yclients_ms` — самое долгое время от отправки запроса в
+  yClients до ответа, `slowest_lease_wait_ms` — самое долгое ожидание lease в
+  очереди лимитера. Запрос, оставшийся без ответа, виден строкой
+  `[yclients] Request aborted after N ms without a response`.
+- Каждый плановый запуск обновления пишет в лог PM2 пару строк
+  `[cron] Reviews snapshot run started: at=…` и
+  `[cron] Reviews snapshot run finished: started_at=…, result=updated|failed|…, refresh_id=…`.
+  Сама попытка пишет `[reviews] Refresh started: id=…` и одну строку
+  `[reviews] Refresh finished: id=…, result=ok|failed, …` с тем же id, причиной
+  сбоя (`error=`), числом отправленных запросов и обоими временами. По этим
+  строкам считаются попытки и результаты за сутки.
+- Проверка на настоящем коде лимитера:
+  `DASHBOARD_SRC=<YClients-Dashboard>/src node server/test/manual/real-limiter-check.js`.
+- В обоих случаях снимок отзывов не перезаписывается, `/reviews` и
+  `/reviews-bundle` отдают прежний.
+
+`server/yclients-limiter-client.js` — копия
+`schedule-online/basic-barista-booking/server/yclients-limiter-client.js`.
+Протокол и HMAC в ней не менять; обновлять только копированием оригинала.
+
+Набор файлов сервера для выкладки: `server.js`, `yclients-fetch.js`,
+`yclients-limiter-client.js` (плюс файлы private feed, если они менялись).
+В `/root/app/.env` нужны `YCLIENTS_LIMITER_URL`,
+`YCLIENTS_LIMITER_INTERNAL_SECRET` и `YCLIENTS_LIMITER_BACKGROUND_TIMEOUT_MS=35000`
+(см. `server/.env.example`). Без адреса и секрета сервис перестанет обновлять
+снимок и будет отдавать последний сохранённый. После перезапуска в логе PM2
+должна быть строка `[server] Yclients limiter: configured, source=reviews.snapshot, mode=required`.
+
 ### Изменить private feed для Telegram
 
 Контракт private feed состоит из трёх связанных файлов:
