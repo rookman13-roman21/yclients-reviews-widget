@@ -5,6 +5,8 @@ const test = require('node:test');
 
 const { YclientsLimiterClientError, signWriteRequest, bodySha256 } = require('../yclients-limiter-client');
 const {
+  LEASE_TTL_MS,
+  MAX_REQUEST_TIMEOUT_MS,
   LIMITER_PRIORITY,
   LIMITER_SOURCE,
   createReviewsLimiter,
@@ -150,4 +152,82 @@ test('other yClients errors and network failures send no report', async () => {
   const network = harness({ yclients: () => { throw new Error('socket hang up'); } });
   await assert.rejects(network.yclientsFetch(YCLIENTS_URL), (error) => !isLimiterRefusal(error) && /socket hang up/.test(error.message));
   assert.deepEqual(network.kinds(), ['lease', 'yclients']);
+});
+
+// Lease живёт 15 секунд. Если ждать ответа yClients дольше, report о позднем 429
+// лимитер отклонит как unknown_lease и cooldown не включится.
+
+function slowYclients({ answerAfterMs, status = 429 }) {
+  const calls = [];
+  const fetchImpl = (url, init = {}) => {
+    const target = String(url);
+    if (target === `${LIMITER_URL}/lease`) {
+      calls.push({ kind: 'lease', at: Date.now() });
+      return Promise.resolve(jsonResponse(200, { lease_id: 'lease-slow' }));
+    }
+    if (target === `${LIMITER_URL}/report`) {
+      calls.push({ kind: 'report', at: Date.now(), body: JSON.parse(init.body) });
+      return Promise.resolve(jsonResponse(200, { ok: true }));
+    }
+    calls.push({ kind: 'yclients', at: Date.now() });
+    return new Promise((resolve, reject) => {
+      const timer = setTimeout(() => resolve(jsonResponse(status, {}, { 'Retry-After': '7' })), answerAfterMs);
+      init.signal.addEventListener('abort', () => {
+        clearTimeout(timer);
+        calls.push({ kind: 'aborted', at: Date.now() });
+        reject(Object.assign(new Error('This operation was aborted'), { name: 'AbortError' }));
+      });
+    });
+  };
+  const limiter = createReviewsLimiter({
+    YCLIENTS_LIMITER_URL: LIMITER_URL,
+    YCLIENTS_LIMITER_INTERNAL_SECRET: 'test-secret',
+  }, { fetchImpl });
+  return { calls, fetchImpl, limiter };
+}
+
+test('request timeout cap is shorter than the lease lifetime', () => {
+  assert.equal(LEASE_TTL_MS, 15000);
+  assert.equal(MAX_REQUEST_TIMEOUT_MS, 12000);
+  assert.ok(MAX_REQUEST_TIMEOUT_MS + 2000 <= LEASE_TTL_MS, 'at least 2 s remain for the report');
+});
+
+test('a caller cannot wait for yClients longer than the cap: the request is aborted before the lease expires', async () => {
+  // Масштаб 1:100: предел 120 мс вместо 12 с, вызывающий просит 20 с, как обновление отзывов.
+  const h = slowYclients({ answerAfterMs: 5000 });
+  const yclientsFetch = createYclientsFetch({
+    limiter: h.limiter, authorization: 'Bearer test', fetchImpl: h.fetchImpl, logger: silentLogger, maxRequestTimeoutMs: 120,
+  });
+
+  await assert.rejects(yclientsFetch(YCLIENTS_URL, { timeout: 20000 }), (error) => !isLimiterRefusal(error) && error.name === 'AbortError');
+
+  assert.deepEqual(h.calls.map((call) => call.kind), ['lease', 'yclients', 'aborted']);
+  const waited = h.calls[2].at - h.calls[1].at;
+  assert.ok(waited >= 100 && waited < 1500, 'aborted at the cap, waited ' + waited + ' ms');
+});
+
+test('a 429 that arrives just before the cap is still reported within the lease lifetime', async () => {
+  const h = slowYclients({ answerAfterMs: 80 });
+  const yclientsFetch = createYclientsFetch({
+    limiter: h.limiter, authorization: 'Bearer test', fetchImpl: h.fetchImpl, logger: silentLogger, maxRequestTimeoutMs: 120,
+  });
+
+  const response = await yclientsFetch(YCLIENTS_URL, { timeout: 20000 });
+
+  assert.equal(response.status, 429);
+  assert.deepEqual(h.calls.map((call) => call.kind), ['lease', 'yclients', 'report']);
+  assert.equal(h.calls[2].body.lease_id, 'lease-slow');
+  // В том же масштабе lease живёт 150 мс: report уходит раньше.
+  assert.ok(h.calls[2].at - h.calls[0].at < 150, 'report sent ' + (h.calls[2].at - h.calls[0].at) + ' ms after the lease');
+});
+
+test('the cap cannot be raised above 12 s and a shorter caller timeout is respected', async () => {
+  const h = slowYclients({ answerAfterMs: 5000 });
+  const yclientsFetch = createYclientsFetch({
+    limiter: h.limiter, authorization: 'Bearer test', fetchImpl: h.fetchImpl, logger: silentLogger, maxRequestTimeoutMs: 600000,
+  });
+
+  await assert.rejects(yclientsFetch(YCLIENTS_URL, { timeout: 60 }), { name: 'AbortError' });
+  const waited = h.calls[2].at - h.calls[1].at;
+  assert.ok(waited < 1500, 'caller timeout of 60 ms applied, waited ' + waited + ' ms');
 });

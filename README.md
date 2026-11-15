@@ -344,6 +344,8 @@ ssh -i ~/.ssh/id_ed25519 root@<mbs-main-tw> 'pm2 restart barista-reviews'
 - Лимитер отказал, не ответил или не настроен: запрос в yClients не уходит,
   `report` не шлётся, в логе строка `[yclients] Request not sent: limiter refused lease (...)`.
 - yClients ответил 429: по этому lease уходит `report` о rate limit.
+- Ответа yClients сервис ждёт не дольше 12 секунд: lease живёт 15 секунд, и
+  `report` о позднем 429 лимитер уже не принял бы.
 - В обоих случаях снимок отзывов не перезаписывается, `/reviews` и
   `/reviews-bundle` отдают прежний.
 
