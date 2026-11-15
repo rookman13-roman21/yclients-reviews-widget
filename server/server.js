@@ -639,6 +639,31 @@ const yclientsFetch = createYclientsFetch({
   authorization: () => `Bearer ${YCLIENTS_PARTNER_TOKEN}` + (YCLIENTS_USER_TOKEN ? `, User ${YCLIENTS_USER_TOKEN}` : '')
 });
 
+// Tries the candidate staff endpoints in order and returns the first list.
+// Stops at once when the limiter refuses a lease or yClients answers 429:
+// the remaining paths must not be requested during a rate limit.
+async function fetchYclientsStaffList(candidatePaths) {
+  let urlTried = null;
+  for (const p of candidatePaths) {
+    const target = `${YCLIENTS_API_BASE}${p}`;
+    urlTried = target;
+    try {
+      const r = await yclientsFetch(target, { timeout: 10000 });
+      if (r.status === 429) break;
+      if (!r.ok) continue;
+      let parsed;
+      try { parsed = JSON.parse(await r.text()); } catch (_) { continue; }
+      if (Array.isArray(parsed)) return { found: parsed, urlTried };
+      if (Array.isArray(parsed.data)) return { found: parsed.data, urlTried };
+      if (Array.isArray(parsed.staff)) return { found: parsed.staff, urlTried };
+      if (Array.isArray(parsed.items)) return { found: parsed.items, urlTried };
+    } catch (e) {
+      if (isLimiterRefusal(e)) break;
+    }
+  }
+  return { found: null, urlTried };
+}
+
 
 function parseYclientsCommentsPayload(parsed) {
   if (parsed && Array.isArray(parsed.data)) return parsed.data;
@@ -1551,23 +1576,7 @@ app.post('/admin/refresh-staff', async (req, res) => {
     `/api/v1/staff?company_id=${encodeURIComponent(YCLIENTS_COMPANY_ID)}`
   ];
 
-  let found = null, urlTried = null;
-  for (const p of candidatePaths) {
-    const target = `${YCLIENTS_API_BASE}${p}`;
-    urlTried = target;
-    try {
-      const r = await yclientsFetch(target, { timeout: 10000 });
-      if (!r.ok) continue;
-      let parsed;
-      try { parsed = JSON.parse(await r.text()); } catch (_) { continue; }
-      if (Array.isArray(parsed)) { found = parsed; break; }
-      if (Array.isArray(parsed.data)) { found = parsed.data; break; }
-      if (Array.isArray(parsed.staff)) { found = parsed.staff; break; }
-      if (Array.isArray(parsed.items)) { found = parsed.items; break; }
-    } catch (e) {
-      if (isLimiterRefusal(e)) break;
-    }
-  }
+  const { found, urlTried } = await fetchYclientsStaffList(candidatePaths);
 
   if (!found) return res.status(502).json({ error: 'staff_list_not_found', tried: urlTried });
 
@@ -1710,21 +1719,7 @@ async function cronRefreshStaff() {
       `/api/v1/employees/${encodeURIComponent(YCLIENTS_COMPANY_ID)}/`
     ];
 
-    let found = null;
-    for (const p of candidatePaths) {
-      try {
-        const r = await yclientsFetch(`${YCLIENTS_API_BASE}${p}`, { timeout: 10000 });
-        if (!r.ok) continue;
-        let parsed;
-        try { parsed = JSON.parse(await r.text()); } catch (_) { continue; }
-        if (Array.isArray(parsed)) { found = parsed; break; }
-        if (Array.isArray(parsed.data)) { found = parsed.data; break; }
-        if (Array.isArray(parsed.staff)) { found = parsed.staff; break; }
-        if (Array.isArray(parsed.items)) { found = parsed.items; break; }
-      } catch (e) {
-        if (isLimiterRefusal(e)) break;
-      }
-    }
+    const { found } = await fetchYclientsStaffList(candidatePaths);
 
     if (!found) return;
     const map = {};

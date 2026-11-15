@@ -7,7 +7,13 @@
 const LIMITER_URL = process.env.YCLIENTS_LIMITER_URL;
 const PAGE_SIZE = 200;
 
-const state = { limiter: 'grant', yclients: 'ok', reviews: 0, timeOffsetMs: 0 };
+// leaseBudget: сколько lease лимитер ещё выдаст (null — без предела).
+// rateLimitFromPage: с какой страницы отзывов yClients отвечает 429 (0 — никогда).
+// staffStatus: HTTP-статус ответа на запросы сотрудников.
+const state = {
+  limiter: 'grant', yclients: 'ok', reviews: 0, timeOffsetMs: 0,
+  leaseBudget: null, rateLimitFromPage: 0, staffStatus: 200,
+};
 const calls = [];
 let leaseCounter = 0;
 
@@ -37,6 +43,10 @@ globalThis.fetch = async (url, init = {}) => {
     calls.push({ kind: 'lease', body: JSON.parse(init.body) });
     if (state.limiter === 'deferred') return json(429, { status: 'deferred', retry_after_ms: 5000 });
     if (state.limiter === 'down') throw new Error('connect ECONNREFUSED');
+    if (state.leaseBudget !== null) {
+      if (state.leaseBudget <= 0) return json(429, { status: 'deferred', retry_after_ms: 5000 });
+      state.leaseBudget -= 1;
+    }
     leaseCounter += 1;
     return json(200, { lease_id: 'lease-' + leaseCounter });
   }
@@ -52,11 +62,13 @@ globalThis.fetch = async (url, init = {}) => {
     if (state.yclients === '429') return json(429, { success: false }, { 'Retry-After': '7' });
     if (parsed.pathname.includes('/comments/')) {
       const page = Number(parsed.searchParams.get('page') || 1);
+      if (state.rateLimitFromPage && page >= state.rateLimitFromPage) return json(429, { success: false }, { 'Retry-After': '7' });
       const start = (page - 1) * PAGE_SIZE;
       const data = [];
       for (let i = start; i < Math.min(state.reviews, start + PAGE_SIZE); i += 1) data.push(review(i));
       return json(200, { success: true, data });
     }
+    if (state.staffStatus !== 200) return json(state.staffStatus, { success: false });
     return json(200, { success: true, data: [{ id: 77, name: 'Тестовый Наставник' }] });
   }
 

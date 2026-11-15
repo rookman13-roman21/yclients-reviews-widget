@@ -201,6 +201,45 @@ test('real yClients 429: report is sent, previous snapshot is still served', asy
   assert.equal(widget.body.total, 203);
 });
 
+test('yClients 429 on the second page: report is sent, pagination stops, previous snapshot is kept', async () => {
+  // 450 отзывов — три страницы. Если бы частичный результат сохранился, в снимке стало бы 200.
+  await control('set', { limiter: 'grant', yclients: 'ok', reviews: 450, rateLimitFromPage: 2 });
+  await control('reset-calls');
+
+  const forced = await request('GET', '/reviews?count=14&refresh=1', { admin: true });
+  assert.equal(forced.status, 500);
+  assert.match(forced.body.detail, /status 429/);
+
+  const calls = await upstreamCalls();
+  assert.deepEqual(calls.map((call) => call.kind), ['lease', 'yclients', 'lease', 'yclients', 'report']);
+  assert.deepEqual(calls.filter((call) => call.kind === 'yclients').map((call) => call.page), ['1', '2']);
+
+  const widget = await request('GET', '/reviews?count=15');
+  assert.equal(widget.status, 200);
+  assert.equal(widget.body.total, 203);
+  const bundle = await request('GET', '/reviews-bundle');
+  assert.equal(bundle.status, 200);
+  assert.equal(bundle.body.count, 203);
+  await control('set', { rateLimitFromPage: 0 });
+});
+
+test('limiter refusal on the second page: second request is not sent, previous snapshot is kept', async () => {
+  await control('set', { limiter: 'grant', yclients: 'ok', reviews: 450, leaseBudget: 1 });
+  await control('reset-calls');
+
+  const forced = await request('GET', '/reviews?count=16&refresh=1', { admin: true });
+  assert.equal(forced.status, 500);
+  assert.equal(forced.body.detail, 'deferred');
+
+  const calls = await upstreamCalls();
+  assert.deepEqual(calls.map((call) => call.kind), ['lease', 'yclients', 'lease']);
+
+  const widget = await request('GET', '/reviews?count=17');
+  assert.equal(widget.status, 200);
+  assert.equal(widget.body.total, 203);
+  await control('set', { leaseBudget: null });
+});
+
 test('stale snapshot + limiter refusal: widget and bundle keep the previous snapshot', async () => {
   // Снимок «стареет» на два часа: непринудительное обновление обязано начаться и упасть.
   await control('set', { limiter: 'deferred', yclients: 'ok', reviews: 1, timeOffsetMs: 2 * 60 * 60 * 1000 });
@@ -228,6 +267,32 @@ test('staff refresh stops at the first limiter refusal instead of trying every p
 
   assert.equal(res.status, 502);
   assert.deepEqual((await upstreamCalls()).map((call) => call.kind), ['lease']);
+});
+
+test('staff refresh stops after a real yClients 429 and reports it once', async () => {
+  await control('set', { limiter: 'grant', yclients: '429', timeOffsetMs: 0 });
+  await control('reset-calls');
+
+  const res = await request('POST', '/admin/refresh-staff', { admin: true });
+
+  assert.equal(res.status, 502);
+  const calls = await upstreamCalls();
+  assert.deepEqual(calls.map((call) => call.kind), ['lease', 'yclients', 'report']);
+  assert.equal(calls[2].body.outcome, 'rate_limited');
+});
+
+test('staff refresh still tries the next path after an ordinary yClients error, one lease per attempt', async () => {
+  await control('set', { limiter: 'grant', yclients: 'ok', staffStatus: 404 });
+  await control('reset-calls');
+
+  const res = await request('POST', '/admin/refresh-staff', { admin: true });
+
+  assert.equal(res.status, 502);
+  assert.deepEqual(
+    (await upstreamCalls()).map((call) => call.kind),
+    ['lease', 'yclients', 'lease', 'yclients', 'lease', 'yclients', 'lease', 'yclients']
+  );
+  await control('set', { staffStatus: 200 });
 });
 
 test('after the limiter recovers the snapshot is refreshed again', async () => {
