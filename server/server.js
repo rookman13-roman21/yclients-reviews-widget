@@ -878,13 +878,16 @@ async function refreshReviewsSnapshot({ force = false } = {}) {
     const internalFeedItems = [];
     let page = 1;
     let pagesLoaded = 0;
+    let slowestRequestMs = 0;
 
     while (pagesLoaded < REVIEWS_SNAPSHOT_MAX_PAGES) {
       const target = new URL(YCLIENTS_API_BASE + '/api/v1/comments/' + encodeURIComponent(YCLIENTS_COMPANY_ID) + '/');
       target.searchParams.set('page', String(page));
       target.searchParams.set('count', String(REVIEWS_SNAPSHOT_PAGE_SIZE));
 
+      const requestStartedAt = Date.now();
       const resp = await yclientsFetch(target.toString(), { timeout: 20000 });
+      slowestRequestMs = Math.max(slowestRequestMs, Date.now() - requestStartedAt);
       if (!resp.ok) {
         const txt = await resp.text().catch(() => '');
         throw new Error('YClients comments status ' + resp.status + ': ' + txt.slice(0, 200));
@@ -931,7 +934,9 @@ async function refreshReviewsSnapshot({ force = false } = {}) {
       }
     }
     await KV.put('reviews:snapshot:last_refresh', String(snapshot.ts));
-    console.log('[reviews] Snapshot refreshed: ' + items.length + ' reviews, pages=' + pagesLoaded);
+    // slowest_request_ms includes the wait for the limiter lease.
+    console.log('[reviews] Snapshot refreshed: ' + items.length + ' reviews, pages=' + pagesLoaded
+      + ', slowest_request_ms=' + slowestRequestMs);
     return snapshot;
   })();
 

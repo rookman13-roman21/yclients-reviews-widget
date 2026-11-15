@@ -344,8 +344,14 @@ ssh -i ~/.ssh/id_ed25519 root@<mbs-main-tw> 'pm2 restart barista-reviews'
 - Лимитер отказал, не ответил или не настроен: запрос в yClients не уходит,
   `report` не шлётся, в логе строка `[yclients] Request not sent: limiter refused lease (...)`.
 - yClients ответил 429: по этому lease уходит `report` о rate limit.
-- Ответа yClients сервис ждёт не дольше 12 секунд: lease живёт 15 секунд, и
-  `report` о позднем 429 лимитер уже не принял бы.
+- Ответа yClients сервис ждёт только до момента «срок lease минус 3 секунды
+  на `report`», то есть не дольше 12 секунд: `report` о 429 по истёкшему lease
+  лимитер не принимает. Срок берётся из ответа лимитера (`expires_at_ms`).
+  Если lease пришёл слишком поздно, запрос не отправляется (`lease_expiring`).
+- Строка `[reviews] Snapshot refreshed: …, slowest_request_ms=N` в логе PM2
+  показывает самый долгий запрос обновления вместе с ожиданием lease.
+- Проверка на настоящем коде лимитера:
+  `DASHBOARD_SRC=<YClients-Dashboard>/src node server/test/manual/real-limiter-check.js`.
 - В обоих случаях снимок отзывов не перезаписывается, `/reviews` и
   `/reviews-bundle` отдают прежний.
 

@@ -7,6 +7,8 @@ const { YclientsLimiterClientError, signWriteRequest, bodySha256 } = require('..
 const {
   LEASE_TTL_MS,
   MAX_REQUEST_TIMEOUT_MS,
+  MIN_REQUEST_BUDGET_MS,
+  REPORT_RESERVE_MS,
   LIMITER_PRIORITY,
   LIMITER_SOURCE,
   createReviewsLimiter,
@@ -154,27 +156,44 @@ test('other yClients errors and network failures send no report', async () => {
   assert.deepEqual(network.kinds(), ['lease', 'yclients']);
 });
 
-// Lease живёт 15 секунд. Если ждать ответа yClients дольше, report о позднем 429
-// лимитер отклонит как unknown_lease и cooldown не включится.
+// ─── Срок жизни lease ───────────────────────────────────────────────────────
+// Report о 429 по истёкшему lease лимитер отклоняет (unknown_lease), cooldown
+// не включается. Тесты идут в масштабе 1:50: lease 300 мс вместо 15 с, запас
+// на report 60 мс вместо 3 с, наименьший бюджет запроса 20 мс вместо 1 с.
 
-function slowYclients({ answerAfterMs, status = 429 }) {
+const SCALED = { leaseTtlMs: 300, reportReserveMs: 60, minRequestBudgetMs: 20 };
+
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+// Поддельный лимитер с настоящим правилом срока: lease выдан в момент grantedAt,
+// report позже grantedAt + ttl отклоняется как unknown_lease.
+function timedHarness({ leaseDelayMs = 0, reportDelayMs = 0, yclientsAnswerAfterMs = 0, yclientsStatus = 429, sendExpiry = true, clockSkewMs = 0 } = {}) {
   const calls = [];
-  const fetchImpl = (url, init = {}) => {
+  let grantedAt = 0;
+  const fetchImpl = async (url, init = {}) => {
     const target = String(url);
     if (target === `${LIMITER_URL}/lease`) {
-      calls.push({ kind: 'lease', at: Date.now() });
-      return Promise.resolve(jsonResponse(200, { lease_id: 'lease-slow' }));
+      grantedAt = Date.now();
+      calls.push({ kind: 'lease' });
+      await sleep(leaseDelayMs); // доставка ответа /lease
+      const body = { lease_id: 'lease-timed' };
+      if (sendExpiry) body.expires_at_ms = grantedAt + SCALED.leaseTtlMs + clockSkewMs;
+      return jsonResponse(200, body);
     }
     if (target === `${LIMITER_URL}/report`) {
-      calls.push({ kind: 'report', at: Date.now(), body: JSON.parse(init.body) });
-      return Promise.resolve(jsonResponse(200, { ok: true }));
+      await sleep(reportDelayMs); // доставка report
+      const accepted = Date.now() <= grantedAt + SCALED.leaseTtlMs;
+      calls.push({ kind: accepted ? 'report-accepted' : 'report-rejected', afterGrantMs: Date.now() - grantedAt });
+      return accepted ? jsonResponse(200, { ok: true, status: 'cooldown_set' }) : jsonResponse(409, { ok: false, status: 'unknown_lease' });
     }
-    calls.push({ kind: 'yclients', at: Date.now() });
+    calls.push({ kind: 'yclients', afterGrantMs: Date.now() - grantedAt });
     return new Promise((resolve, reject) => {
-      const timer = setTimeout(() => resolve(jsonResponse(status, {}, { 'Retry-After': '7' })), answerAfterMs);
+      const timer = setTimeout(() => resolve(jsonResponse(yclientsStatus, {}, { 'Retry-After': '7' })), yclientsAnswerAfterMs);
       init.signal.addEventListener('abort', () => {
         clearTimeout(timer);
-        calls.push({ kind: 'aborted', at: Date.now() });
+        calls.push({ kind: 'aborted', afterGrantMs: Date.now() - grantedAt });
         reject(Object.assign(new Error('This operation was aborted'), { name: 'AbortError' }));
       });
     });
@@ -183,51 +202,83 @@ function slowYclients({ answerAfterMs, status = 429 }) {
     YCLIENTS_LIMITER_URL: LIMITER_URL,
     YCLIENTS_LIMITER_INTERNAL_SECRET: 'test-secret',
   }, { fetchImpl });
-  return { calls, fetchImpl, limiter };
+  const yclientsFetch = createYclientsFetch({ limiter, authorization: 'Bearer test', fetchImpl, logger: silentLogger, timing: SCALED });
+  return { calls, yclientsFetch, kinds: () => calls.map((call) => call.kind) };
 }
 
-test('request timeout cap is shorter than the lease lifetime', () => {
+test('production timing: the request budget plus the report reserve equals the lease lifetime', () => {
   assert.equal(LEASE_TTL_MS, 15000);
+  assert.equal(REPORT_RESERVE_MS, 3000);
   assert.equal(MAX_REQUEST_TIMEOUT_MS, 12000);
-  assert.ok(MAX_REQUEST_TIMEOUT_MS + 2000 <= LEASE_TTL_MS, 'at least 2 s remain for the report');
+  assert.equal(MIN_REQUEST_BUDGET_MS, 1000);
 });
 
-test('a caller cannot wait for yClients longer than the cap: the request is aborted before the lease expires', async () => {
-  // Масштаб 1:100: предел 120 мс вместо 12 с, вызывающий просит 20 с, как обновление отзывов.
-  const h = slowYclients({ answerAfterMs: 5000 });
-  const yclientsFetch = createYclientsFetch({
-    limiter: h.limiter, authorization: 'Bearer test', fetchImpl: h.fetchImpl, logger: silentLogger, maxRequestTimeoutMs: 120,
-  });
+test('caller asks for 20 s, yClients is silent: aborted before the lease expires, no report', async () => {
+  const h = timedHarness({ yclientsAnswerAfterMs: 5000 });
 
-  await assert.rejects(yclientsFetch(YCLIENTS_URL, { timeout: 20000 }), (error) => !isLimiterRefusal(error) && error.name === 'AbortError');
+  await assert.rejects(h.yclientsFetch(YCLIENTS_URL, { timeout: 20000 }), { name: 'AbortError' });
 
-  assert.deepEqual(h.calls.map((call) => call.kind), ['lease', 'yclients', 'aborted']);
-  const waited = h.calls[2].at - h.calls[1].at;
-  assert.ok(waited >= 100 && waited < 1500, 'aborted at the cap, waited ' + waited + ' ms');
+  assert.deepEqual(h.kinds(), ['lease', 'yclients', 'aborted']);
+  assert.ok(h.calls[2].afterGrantMs <= SCALED.leaseTtlMs - SCALED.reportReserveMs + 25, 'aborted ' + h.calls[2].afterGrantMs + ' ms after the grant');
 });
 
-test('a 429 that arrives just before the cap is still reported within the lease lifetime', async () => {
-  const h = slowYclients({ answerAfterMs: 80 });
-  const yclientsFetch = createYclientsFetch({
-    limiter: h.limiter, authorization: 'Bearer test', fetchImpl: h.fetchImpl, logger: silentLogger, maxRequestTimeoutMs: 120,
-  });
+test('slow lease delivery shortens the request budget: a late 429 is still reported in time', async () => {
+  // Lease шёл 150 мс из 300. Прежний фиксированный предел (240 мс от получения)
+  // дождался бы ответа на 380-й мс и опоздал с report.
+  const h = timedHarness({ leaseDelayMs: 150, yclientsAnswerAfterMs: 70 });
 
-  const response = await yclientsFetch(YCLIENTS_URL, { timeout: 20000 });
+  const response = await h.yclientsFetch(YCLIENTS_URL, { timeout: 20000 });
 
   assert.equal(response.status, 429);
-  assert.deepEqual(h.calls.map((call) => call.kind), ['lease', 'yclients', 'report']);
-  assert.equal(h.calls[2].body.lease_id, 'lease-slow');
-  // В том же масштабе lease живёт 150 мс: report уходит раньше.
-  assert.ok(h.calls[2].at - h.calls[0].at < 150, 'report sent ' + (h.calls[2].at - h.calls[0].at) + ' ms after the lease');
+  assert.deepEqual(h.kinds(), ['lease', 'yclients', 'report-accepted']);
 });
 
-test('the cap cannot be raised above 12 s and a shorter caller timeout is respected', async () => {
-  const h = slowYclients({ answerAfterMs: 5000 });
-  const yclientsFetch = createYclientsFetch({
-    limiter: h.limiter, authorization: 'Bearer test', fetchImpl: h.fetchImpl, logger: silentLogger, maxRequestTimeoutMs: 600000,
-  });
+test('slow lease delivery + slow yClients: aborted at the lease-based deadline, not at a fixed cap', async () => {
+  const h = timedHarness({ leaseDelayMs: 150, yclientsAnswerAfterMs: 200 });
 
-  await assert.rejects(yclientsFetch(YCLIENTS_URL, { timeout: 60 }), { name: 'AbortError' });
-  const waited = h.calls[2].at - h.calls[1].at;
-  assert.ok(waited < 1500, 'caller timeout of 60 ms applied, waited ' + waited + ' ms');
+  await assert.rejects(h.yclientsFetch(YCLIENTS_URL, { timeout: 20000 }), { name: 'AbortError' });
+
+  assert.deepEqual(h.kinds(), ['lease', 'yclients', 'aborted']);
+  assert.ok(h.calls[2].afterGrantMs <= SCALED.leaseTtlMs - SCALED.reportReserveMs + 25, 'aborted ' + h.calls[2].afterGrantMs + ' ms after the grant');
+});
+
+test('lease delivered too late: request is not sent and no report is made', async () => {
+  const h = timedHarness({ leaseDelayMs: 260 });
+
+  await assert.rejects(h.yclientsFetch(YCLIENTS_URL), (error) => isLimiterRefusal(error) && error.code === 'lease_expiring');
+
+  assert.deepEqual(h.kinds(), ['lease']);
+});
+
+test('slow report delivery within the reserve is still accepted', async () => {
+  const h = timedHarness({ yclientsAnswerAfterMs: 220, reportDelayMs: 40 });
+
+  const response = await h.yclientsFetch(YCLIENTS_URL, { timeout: 20000 });
+
+  assert.equal(response.status, 429);
+  assert.deepEqual(h.kinds(), ['lease', 'yclients', 'report-accepted']);
+});
+
+test('limiter clock ahead of ours cannot extend the budget beyond the default lifetime', async () => {
+  const h = timedHarness({ yclientsAnswerAfterMs: 5000, clockSkewMs: 60000 });
+
+  await assert.rejects(h.yclientsFetch(YCLIENTS_URL, { timeout: 20000 }), { name: 'AbortError' });
+
+  assert.ok(h.calls[2].afterGrantMs <= SCALED.leaseTtlMs - SCALED.reportReserveMs + 25, 'aborted ' + h.calls[2].afterGrantMs + ' ms after the grant');
+});
+
+test('lease response without expires_at_ms falls back to the default lifetime from receipt', async () => {
+  const h = timedHarness({ yclientsAnswerAfterMs: 5000, sendExpiry: false });
+
+  await assert.rejects(h.yclientsFetch(YCLIENTS_URL, { timeout: 20000 }), { name: 'AbortError' });
+
+  assert.ok(h.calls[2].afterGrantMs <= SCALED.leaseTtlMs - SCALED.reportReserveMs + 25);
+});
+
+test('a shorter caller timeout is respected', async () => {
+  const h = timedHarness({ yclientsAnswerAfterMs: 5000 });
+
+  await assert.rejects(h.yclientsFetch(YCLIENTS_URL, { timeout: 40 }), { name: 'AbortError' });
+
+  assert.ok(h.calls[2].afterGrantMs < 150, 'aborted ' + h.calls[2].afterGrantMs + ' ms after the grant');
 });
