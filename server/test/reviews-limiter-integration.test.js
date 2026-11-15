@@ -7,126 +7,17 @@
 // отзывов продолжает отдаваться.
 
 const assert = require('node:assert/strict');
-const { spawn } = require('node:child_process');
-const fs = require('node:fs');
-const http = require('node:http');
-const net = require('node:net');
-const os = require('node:os');
-const path = require('node:path');
 const { after, before, test } = require('node:test');
 
-const SERVER_DIR = path.join(__dirname, '..');
-const ORIGIN = 'https://baristaschool.ru';
-const ADMIN_KEY = 'test-admin-key';
-const SERVER_FILES = [
-  'server.js',
-  'kv-store.js',
-  'review-feed.js',
-  'review-visit-enrichment.js',
-  'yclients-fetch.js',
-  'yclients-limiter-client.js',
-];
+const { startServer } = require('./helpers/server-harness');
 
-let child;
-let workDir;
-let port;
-let messageId = 0;
-let output = '';
-const pending = new Map();
+let server;
+const control = (type, state) => server.control(type, state);
+const request = (method, pathname, options) => server.request(method, pathname, options);
+const upstreamCalls = () => server.upstreamCalls();
 
-function freePort() {
-  return new Promise((resolve, reject) => {
-    const probe = net.createServer();
-    probe.once('error', reject);
-    probe.listen(0, '127.0.0.1', () => {
-      const { port: free } = probe.address();
-      probe.close(() => resolve(free));
-    });
-  });
-}
-
-function control(type, state) {
-  return new Promise((resolve) => {
-    messageId += 1;
-    pending.set(messageId, resolve);
-    child.send({ id: messageId, type, state });
-  });
-}
-
-async function upstreamCalls() {
-  return (await control('dump')).calls;
-}
-
-function request(method, pathname, { admin = false } = {}) {
-  return new Promise((resolve, reject) => {
-    const headers = { Origin: ORIGIN };
-    if (admin) headers['X-Admin-Key'] = ADMIN_KEY;
-    const req = http.request({ host: '127.0.0.1', port, path: pathname, method, headers }, (res) => {
-      let body = '';
-      res.setEncoding('utf8');
-      res.on('data', (chunk) => { body += chunk; });
-      res.on('end', () => {
-        let parsed = null;
-        try { parsed = JSON.parse(body); } catch (_) {}
-        resolve({ status: res.statusCode, body: parsed });
-      });
-    });
-    req.on('error', reject);
-    req.end();
-  });
-}
-
-async function waitForServer() {
-  const deadline = Date.now() + 15000;
-  while (Date.now() < deadline) {
-    try {
-      const res = await request('GET', '/health');
-      if (res.status === 200) return;
-    } catch (_) {}
-    await new Promise((resolve) => setTimeout(resolve, 100));
-  }
-  throw new Error('server did not start:\n' + output);
-}
-
-before(async () => {
-  workDir = fs.mkdtempSync(path.join(os.tmpdir(), 'reviews-limiter-'));
-  for (const file of SERVER_FILES) fs.copyFileSync(path.join(SERVER_DIR, file), path.join(workDir, file));
-  fs.symlinkSync(fs.realpathSync(path.join(SERVER_DIR, 'node_modules')), path.join(workDir, 'node_modules'), 'dir');
-  port = await freePort();
-
-  child = spawn(process.execPath, ['--require', path.join(__dirname, 'helpers', 'mock-upstreams.js'), 'server.js'], {
-    cwd: workDir,
-    env: {
-      PATH: process.env.PATH,
-      PORT: String(port),
-      DISABLE_CRON: '1',
-      ADMIN_KEY,
-      YCLIENTS_PARTNER_TOKEN: 'test-partner',
-      YCLIENTS_USER_TOKEN: 'test-user',
-      YCLIENTS_COMPANY_ID: '453962',
-      YCLIENTS_RECORDS_SNAPSHOT_PATH: '',
-      INTERNAL_REVIEWS_FEED_PATH: '',
-      YCLIENTS_LIMITER_URL: 'http://limiter.test/api/internal/yclients-limiter/v1',
-      YCLIENTS_LIMITER_INTERNAL_SECRET: 'test-secret',
-      // Проверяет и то, что значение off из окружения не отключает лимитер.
-      YCLIENTS_LIMITER_MODE: 'off',
-    },
-    stdio: ['ignore', 'pipe', 'pipe', 'ipc'],
-  });
-  child.stdout.on('data', (chunk) => { output += chunk; });
-  child.stderr.on('data', (chunk) => { output += chunk; });
-  child.on('message', (message) => {
-    const resolve = pending.get(message.id);
-    pending.delete(message.id);
-    if (resolve) resolve(message);
-  });
-  await waitForServer();
-});
-
-after(() => {
-  if (child) child.kill('SIGKILL');
-  if (workDir) fs.rmSync(workDir, { recursive: true, force: true });
-});
+before(async () => { server = await startServer(); });
+after(() => { if (server) server.stop(); });
 
 // Тесты идут по порядку и делят один процесс: первый создаёт снимок,
 // остальные проверяют, что сбои его не затирают.
@@ -137,7 +28,7 @@ test('forced refresh takes a lease for every page of pagination', async () => {
 
   const res = await request('GET', '/reviews?count=5&refresh=1', { admin: true });
 
-  assert.equal(res.status, 200, output);
+  assert.equal(res.status, 200, server.output());
   assert.equal(res.body.total, 203);
   const calls = await upstreamCalls();
   assert.deepEqual(calls.map((call) => call.kind), ['lease', 'yclients', 'lease', 'yclients']);
@@ -146,7 +37,12 @@ test('forced refresh takes a lease for every page of pagination', async () => {
     assert.deepEqual(lease.body, { source: 'reviews.snapshot', priority: 'background' });
   }
   // Строка для суточной приёмки: время ответа yClients отдельно от ожидания lease.
-  assert.match(output, /\[reviews\] Snapshot refreshed: 203 reviews, pages=2, slowest_yclients_ms=\d+, slowest_lease_wait_ms=\d+/);
+  const log = server.output();
+  assert.match(log, /\[reviews\] Snapshot refreshed: 203 reviews, pages=2, slowest_yclients_ms=\d+, slowest_lease_wait_ms=\d+/);
+  // Начало и итог попытки связаны одним id.
+  const started = /\[reviews\] Refresh started: id=(\S+), at=\d{4}-\d\d-\d\dT[\d:.]+Z, trigger=route, force=1/.exec(log);
+  assert.ok(started, log);
+  assert.ok(log.includes('[reviews] Refresh finished: id=' + started[1] + ', result=ok, reviews=203, pages=2, requests=2, slowest_yclients_ms='), log);
 });
 
 test('limiter refusal: nothing is sent to yClients, no report, previous snapshot is still served', async () => {
@@ -159,6 +55,7 @@ test('limiter refusal: nothing is sent to yClients, no report, previous snapshot
 
   const calls = await upstreamCalls();
   assert.deepEqual(calls.map((call) => call.kind), ['lease']);
+  assert.match(server.output(), /\[reviews\] Refresh finished: id=\S+, result=failed, error=limiter_deferred, pages=0, requests=0, /);
 
   const widget = await request('GET', '/reviews?count=7');
   assert.equal(widget.status, 200);
@@ -214,6 +111,8 @@ test('yClients 429 on the second page: report is sent, pagination stops, previou
 
   const calls = await upstreamCalls();
   assert.deepEqual(calls.map((call) => call.kind), ['lease', 'yclients', 'lease', 'yclients', 'report']);
+  // Неуспешная попытка тоже пишет итог: причина и время ответа yClients.
+  assert.match(server.output(), /\[reviews\] Refresh finished: id=\S+, result=failed, error=yclients_status_429, pages=1, requests=2, slowest_yclients_ms=\d+, slowest_lease_wait_ms=\d+, duration_ms=\d+/);
   assert.deepEqual(calls.filter((call) => call.kind === 'yclients').map((call) => call.page), ['1', '2']);
 
   const widget = await request('GET', '/reviews?count=15');

@@ -353,6 +353,13 @@ ssh -i ~/.ssh/id_ed25519 root@<mbs-main-tw> 'pm2 restart barista-reviews'
   yClients до ответа, `slowest_lease_wait_ms` — самое долгое ожидание lease в
   очереди лимитера. Запрос, оставшийся без ответа, виден строкой
   `[yclients] Request aborted after N ms without a response`.
+- Каждый плановый запуск обновления пишет в лог PM2 пару строк
+  `[cron] Reviews snapshot run started: at=…` и
+  `[cron] Reviews snapshot run finished: started_at=…, result=updated|failed|…, refresh_id=…`.
+  Сама попытка пишет `[reviews] Refresh started: id=…` и одну строку
+  `[reviews] Refresh finished: id=…, result=ok|failed, …` с тем же id, причиной
+  сбоя (`error=`), числом отправленных запросов и обоими временами. По этим
+  строкам считаются попытки и результаты за сутки.
 - Проверка на настоящем коде лимитера:
   `DASHBOARD_SRC=<YClients-Dashboard>/src node server/test/manual/real-limiter-check.js`.
 - В обоих случаях снимок отзывов не перезаписывается, `/reviews` и
