@@ -86,9 +86,13 @@ function createYclientsFetch({ limiter, authorization, fetchImpl, logger = conso
   const reportReserveMs = timing.reportReserveMs || REPORT_RESERVE_MS;
   const minRequestBudgetMs = timing.minRequestBudgetMs || MIN_REQUEST_BUDGET_MS;
 
+  // opts.onTiming({ leaseWaitMs, requestMs, status, aborted }) вызывается после
+  // каждого отправленного запроса. requestMs — только время от отправки в
+  // yClients до ответа; ожидание lease в очереди лимитера считается отдельно.
   return async function yclientsFetch(url, opts = {}) {
     let lease;
     let budgetMs;
+    const acquireStartedAt = Date.now();
     try {
       // Отказ в lease бросает ошибку до отправки запроса; report при этом не шлётся.
       lease = await limiter.acquire(LIMITER_PRIORITY);
@@ -115,12 +119,26 @@ function createYclientsFetch({ limiter, authorization, fetchImpl, logger = conso
     const requested = Number(opts.timeout) > 0 ? Number(opts.timeout) : budgetMs;
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), Math.min(requested, budgetMs));
+    const requestStartedAt = Date.now();
+    const leaseWaitMs = requestStartedAt - acquireStartedAt;
+    const reportTiming = (extra) => {
+      if (typeof opts.onTiming !== 'function') return;
+      try { opts.onTiming({ leaseWaitMs, requestMs: Date.now() - requestStartedAt, ...extra }); } catch (_) { /* учёт не влияет на запрос */ }
+    };
     let response;
     try {
       response = await (fetchImpl || fetch)(url, { method: opts.method || 'GET', headers, signal: controller.signal });
+    } catch (error) {
+      const aborted = controller.signal.aborted;
+      if (aborted) {
+        logger.warn('[yclients] Request aborted after ' + (Date.now() - requestStartedAt) + ' ms without a response (lease wait ' + leaseWaitMs + ' ms)');
+      }
+      reportTiming({ status: null, aborted });
+      throw error;
     } finally {
       clearTimeout(timeout);
     }
+    reportTiming({ status: Number(response && response.status) || null, aborted: false });
     if (response && Number(response.status) === 429) {
       await limiter.reportRateLimit(lease, rateLimitRetryAfterMs(response));
     }

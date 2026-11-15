@@ -145,6 +145,8 @@ test('forced refresh takes a lease for every page of pagination', async () => {
   for (const lease of calls.filter((call) => call.kind === 'lease')) {
     assert.deepEqual(lease.body, { source: 'reviews.snapshot', priority: 'background' });
   }
+  // Строка для суточной приёмки: время ответа yClients отдельно от ожидания lease.
+  assert.match(output, /\[reviews\] Snapshot refreshed: 203 reviews, pages=2, slowest_yclients_ms=\d+, slowest_lease_wait_ms=\d+/);
 });
 
 test('limiter refusal: nothing is sent to yClients, no report, previous snapshot is still served', async () => {

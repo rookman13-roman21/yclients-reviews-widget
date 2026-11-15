@@ -348,8 +348,11 @@ ssh -i ~/.ssh/id_ed25519 root@<mbs-main-tw> 'pm2 restart barista-reviews'
   на `report`», то есть не дольше 12 секунд: `report` о 429 по истёкшему lease
   лимитер не принимает. Срок берётся из ответа лимитера (`expires_at_ms`).
   Если lease пришёл слишком поздно, запрос не отправляется (`lease_expiring`).
-- Строка `[reviews] Snapshot refreshed: …, slowest_request_ms=N` в логе PM2
-  показывает самый долгий запрос обновления вместе с ожиданием lease.
+- Строка `[reviews] Snapshot refreshed: …, slowest_yclients_ms=N, slowest_lease_wait_ms=M`
+  в логе PM2: `slowest_yclients_ms` — самое долгое время от отправки запроса в
+  yClients до ответа, `slowest_lease_wait_ms` — самое долгое ожидание lease в
+  очереди лимитера. Запрос, оставшийся без ответа, виден строкой
+  `[yclients] Request aborted after N ms without a response`.
 - Проверка на настоящем коде лимитера:
   `DASHBOARD_SRC=<YClients-Dashboard>/src node server/test/manual/real-limiter-check.js`.
 - В обоих случаях снимок отзывов не перезаписывается, `/reviews` и

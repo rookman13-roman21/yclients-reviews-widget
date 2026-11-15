@@ -203,7 +203,7 @@ function timedHarness({ leaseDelayMs = 0, reportDelayMs = 0, yclientsAnswerAfter
     YCLIENTS_LIMITER_INTERNAL_SECRET: 'test-secret',
   }, { fetchImpl });
   const yclientsFetch = createYclientsFetch({ limiter, authorization: 'Bearer test', fetchImpl, logger: silentLogger, timing: SCALED });
-  return { calls, yclientsFetch, kinds: () => calls.map((call) => call.kind) };
+  return { calls, fetchImpl, yclientsFetch, kinds: () => calls.map((call) => call.kind) };
 }
 
 test('production timing: the request budget plus the report reserve equals the lease lifetime', () => {
@@ -231,6 +231,38 @@ test('slow lease delivery shortens the request budget: a late 429 is still repor
 
   assert.equal(response.status, 429);
   assert.deepEqual(h.kinds(), ['lease', 'yclients', 'report-accepted']);
+});
+
+test('timing separates the lease wait from the yClients response time', async () => {
+  const h = timedHarness({ leaseDelayMs: 150, yclientsAnswerAfterMs: 40, yclientsStatus: 200 });
+  const timings = [];
+
+  await h.yclientsFetch(YCLIENTS_URL, { timeout: 20000, onTiming: (timing) => timings.push(timing) });
+
+  assert.equal(timings.length, 1);
+  assert.equal(timings[0].status, 200);
+  assert.equal(timings[0].aborted, false);
+  assert.ok(timings[0].leaseWaitMs >= 140, 'lease wait ' + timings[0].leaseWaitMs + ' ms');
+  assert.ok(timings[0].requestMs >= 30 && timings[0].requestMs < 120, 'yClients time ' + timings[0].requestMs + ' ms excludes the lease wait');
+});
+
+test('aborted request is logged and reported to onTiming; a throwing onTiming does not break the request', async () => {
+  const warnings = [];
+  const h = timedHarness({ yclientsAnswerAfterMs: 5000 });
+  const limiter = createReviewsLimiter({ YCLIENTS_LIMITER_URL: LIMITER_URL, YCLIENTS_LIMITER_INTERNAL_SECRET: 'test-secret' }, { fetchImpl: h.fetchImpl });
+  const yclientsFetch = createYclientsFetch({
+    limiter, authorization: 'Bearer test', fetchImpl: h.fetchImpl, logger: { warn: (line) => warnings.push(line) }, timing: SCALED,
+  });
+  const timings = [];
+
+  await assert.rejects(yclientsFetch(YCLIENTS_URL, { timeout: 50, onTiming: (timing) => timings.push(timing) }), { name: 'AbortError' });
+  assert.equal(timings[0].aborted, true);
+  assert.equal(timings[0].status, null);
+  assert.match(warnings[0], /^\[yclients\] Request aborted after \d+ ms without a response/);
+
+  const ok = timedHarness({ yclientsAnswerAfterMs: 5, yclientsStatus: 200 });
+  const response = await ok.yclientsFetch(YCLIENTS_URL, { onTiming: () => { throw new Error('boom'); } });
+  assert.equal(response.status, 200);
 });
 
 test('slow lease delivery + slow yClients: aborted at the lease-based deadline, not at a fixed cap', async () => {
