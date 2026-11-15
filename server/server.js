@@ -18,6 +18,7 @@ const {
   reviewClientId,
   reviewPhone
 } = require('./review-visit-enrichment');
+const { createReviewsLimiter, createYclientsFetch, isLimiterRefusal } = require('./yclients-fetch');
 
 // ─── Config ──────────────────────────────────────────────────────────────────
 
@@ -629,18 +630,14 @@ function getSiteHealthMonitorScript() {
 `;
 }
 
-function yclientsFetch(url, opts = {}) {
-  const headers = {
-    'Accept': 'application/vnd.yclients.v2+json',
-    'Content-Type': 'application/json',
-    'Authorization': `Bearer ${YCLIENTS_PARTNER_TOKEN}` + (YCLIENTS_USER_TOKEN ? `, User ${YCLIENTS_USER_TOKEN}` : ''),
-    ...opts.headers
-  };
-  const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), opts.timeout || 30000);
-  return fetch(url, { method: opts.method || 'GET', headers, signal: controller.signal })
-    .finally(() => clearTimeout(timeout));
-}
+// Every yClients HTTP request goes through the shared rate limiter
+// (source=reviews.snapshot, priority=background, mode=required). A refused
+// lease throws before the request is sent; see yclients-fetch.js.
+const yclientsLimiter = createReviewsLimiter(process.env);
+const yclientsFetch = createYclientsFetch({
+  limiter: yclientsLimiter,
+  authorization: () => `Bearer ${YCLIENTS_PARTNER_TOKEN}` + (YCLIENTS_USER_TOKEN ? `, User ${YCLIENTS_USER_TOKEN}` : '')
+});
 
 
 function parseYclientsCommentsPayload(parsed) {
@@ -831,9 +828,22 @@ async function refreshReviewsSnapshot({ force = false } = {}) {
     throw new Error('YCLIENTS_PARTNER_TOKEN not configured');
   }
 
+  // A failed refresh (limiter refusal, yClients 429 or any other error) never
+  // replaces the stored snapshot. Non-forced callers keep serving the previous
+  // one; forced callers (cron, admin refresh=1) still see the error.
+  const keepPrevious = (error) => {
+    if (force || !current) throw error;
+    console.error('[reviews] Snapshot refresh failed, serving previous snapshot:', error && error.message);
+    return { snapshot: current, refreshed: false, reason: 'refresh_failed_stale' };
+  };
+
   if (__reviewsSnapshotRefreshPromise) {
-    const snapshot = await __reviewsSnapshotRefreshPromise;
-    return { snapshot, refreshed: false, reason: 'refresh_in_progress' };
+    try {
+      const snapshot = await __reviewsSnapshotRefreshPromise;
+      return { snapshot, refreshed: false, reason: 'refresh_in_progress' };
+    } catch (error) {
+      return keepPrevious(error);
+    }
   }
 
   __reviewsSnapshotRefreshPromise = (async () => {
@@ -903,6 +913,8 @@ async function refreshReviewsSnapshot({ force = false } = {}) {
   try {
     const snapshot = await __reviewsSnapshotRefreshPromise;
     return { snapshot, refreshed: true, reason: 'updated' };
+  } catch (error) {
+    return keepPrevious(error);
   } finally {
     __reviewsSnapshotRefreshPromise = null;
   }
@@ -1552,7 +1564,9 @@ app.post('/admin/refresh-staff', async (req, res) => {
       if (Array.isArray(parsed.data)) { found = parsed.data; break; }
       if (Array.isArray(parsed.staff)) { found = parsed.staff; break; }
       if (Array.isArray(parsed.items)) { found = parsed.items; break; }
-    } catch (_) {}
+    } catch (e) {
+      if (isLimiterRefusal(e)) break;
+    }
   }
 
   if (!found) return res.status(502).json({ error: 'staff_list_not_found', tried: urlTried });
@@ -1707,7 +1721,9 @@ async function cronRefreshStaff() {
         if (Array.isArray(parsed.data)) { found = parsed.data; break; }
         if (Array.isArray(parsed.staff)) { found = parsed.staff; break; }
         if (Array.isArray(parsed.items)) { found = parsed.items; break; }
-      } catch (_) {}
+      } catch (e) {
+        if (isLimiterRefusal(e)) break;
+      }
     }
 
     if (!found) return;
@@ -1943,6 +1959,7 @@ app.listen(PORT, '0.0.0.0', () => {
   console.log(`[server] Barista Reviews Proxy running on port ${PORT}`);
   console.log(`[server] Admin key: ${ADMIN_KEY ? 'configured' : 'NOT SET (admin endpoints disabled)'}`);
   console.log(`[server] Yclients: partner=${YCLIENTS_PARTNER_TOKEN ? 'configured' : 'NOT SET'}, company=${YCLIENTS_COMPANY_ID}`);
+  console.log(`[server] Yclients limiter: ${yclientsLimiter.endpoint && yclientsLimiter.secret ? 'configured' : 'NOT SET (yClients requests will not be sent)'}, source=${yclientsLimiter.source}, mode=${yclientsLimiter.mode}`);
 });
 
 // Graceful shutdown

@@ -333,6 +333,32 @@ scp -i ~/.ssh/id_ed25519 server/public/widgets/reviews.js root@<mbs-main-tw>:/ro
 ssh -i ~/.ssh/id_ed25519 root@<mbs-main-tw> 'pm2 restart barista-reviews'
 ```
 
+### Общий лимитер yClients (пакет 0810)
+
+Сервис ходит в API yClients только через `yclientsFetch` из
+`server/yclients-fetch.js`. Перед каждым HTTP-запросом, включая каждую страницу
+пагинации, он берёт разрешение (lease) у общего лимитера YClients-Dashboard:
+`source=reviews.snapshot`, приоритет `background`, режим всегда `required`
+(значение `YCLIENTS_LIMITER_MODE` из `.env` его не ослабляет).
+
+- Лимитер отказал, не ответил или не настроен: запрос в yClients не уходит,
+  `report` не шлётся, в логе строка `[yclients] Request not sent: limiter refused lease (...)`.
+- yClients ответил 429: по этому lease уходит `report` о rate limit.
+- В обоих случаях снимок отзывов не перезаписывается, `/reviews` и
+  `/reviews-bundle` отдают прежний.
+
+`server/yclients-limiter-client.js` — копия
+`schedule-online/basic-barista-booking/server/yclients-limiter-client.js`.
+Протокол и HMAC в ней не менять; обновлять только копированием оригинала.
+
+Набор файлов сервера для выкладки: `server.js`, `yclients-fetch.js`,
+`yclients-limiter-client.js` (плюс файлы private feed, если они менялись).
+В `/root/app/.env` нужны `YCLIENTS_LIMITER_URL`,
+`YCLIENTS_LIMITER_INTERNAL_SECRET` и `YCLIENTS_LIMITER_BACKGROUND_TIMEOUT_MS=35000`
+(см. `server/.env.example`). Без адреса и секрета сервис перестанет обновлять
+снимок и будет отдавать последний сохранённый. После перезапуска в логе PM2
+должна быть строка `[server] Yclients limiter: configured, source=reviews.snapshot, mode=required`.
+
 ### Изменить private feed для Telegram
 
 Контракт private feed состоит из трёх связанных файлов:
