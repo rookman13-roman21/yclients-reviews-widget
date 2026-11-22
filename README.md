@@ -68,7 +68,7 @@ YClients API (company 453962)
 Перед публикацией любого кастомного HTML-блока проверить:
 
 - внутри блока нет `<!DOCTYPE>`, `<html>`, `<head>`, `<body>`, `</body>`, `</html>`;
-- внешние `<script src="...">` по возможности имеют `defer` или грузятся через маленький async-loader;
+- внешние `<script src="...">` с нашего сервера подключаются с `async`, а не `defer` (тред 0902, 22.11.2026): при зависшем api `defer`-скрипт держит `DOMContentLoaded`, а Tilda на десктопе показывает блоки только после него (запасной таймер около 5 с). Синхронные скрипты без `async/defer` недопустимы;
 - блок не делает массовые запросы к API при каждой загрузке страницы;
 - если блок зависит от backend, у него есть timeout, fallback и кэш.
 
@@ -399,8 +399,10 @@ ssh -i ~/.ssh/id_ed25519 root@<mbs-main-tw> 'pm2 restart barista-reviews'
 
 ```html
 <div id="mbs-reviews-widget" data-mbs-reviews-widget></div>
-<script defer src="https://api.barista-school.ru/widgets/reviews.js?v=20260619-1"></script>
+<script async src="https://api.barista-school.ru/widgets/reviews.js?v=20260907-1"></script>
 ```
+
+Именно `async`, не `defer`: зависший `defer`-скрипт держит `DOMContentLoaded` всей страницы (тред 0902). Loader находит свой блок через `document.currentScript`, поэтому порядок выполнения ему не важен.
 
 После этого обычные изменения виджета делаются через `reviews-widget.html` → `node scripts/build-hosted-widget.js` → деплой файлов из `server/public/widgets/` на сервер. Tilda-код менять не нужно.
 
